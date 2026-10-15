@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
@@ -17,14 +17,14 @@ func main() {
 		log.Fatal("DATABASE_URL is not set")
 	}
 
-	conn, err := pgx.Connect(ctx, url)
+	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
 		log.Fatalf("connect failed: %v", err)
 	}
-	defer conn.Close(ctx)
+	defer pool.Close()
 
 	var n int
-	if err := conn.QueryRow(ctx, "SELECT 1").Scan(&n); err != nil {
+	if err := pool.QueryRow(ctx, "SELECT 1").Scan(&n); err != nil {
 		log.Fatalf("query failed: %v", err)
 	}
 	fmt.Println(n)
