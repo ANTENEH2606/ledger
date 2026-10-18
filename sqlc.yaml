@@ -1,0 +1,18 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    # sqlc reads the migrations directly as the schema (it ignores *.down.sql)
+    schema: "db/migrations"
+    queries: "db/queries"
+    gen:
+      go:
+        package: "db"
+        out: "internal/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_interface: true
+        overrides:
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - db_type: "date"
+            go_type: "time.Time"
