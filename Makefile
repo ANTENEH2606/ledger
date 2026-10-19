@@ -1,13 +1,13 @@
 .RECIPEPREFIX = >
 DB_URL ?= $(shell grep '^DATABASE_URL=' .env | cut -d= -f2-)
 
-.PHONY: run build tidy db-up migrate-up migrate-down migrate-new migrate-status psql
+.PHONY: run build tidy db-up migrate-up migrate-down migrate-new migrate-status psql test test-db
 
 run:
-> go run main.go
+> DATABASE_URL="$(DB_URL)"  go run main.go
 
 build:
-> go build -o ledger .
+> DATABASE_URL="$(DB_URL)"  go build -o ledger .
 
 tidy:
 > go mod tidy
@@ -31,3 +31,9 @@ migrate-new:
 
 psql: db-up
 > docker exec -it ledger psql -U ledger -d ledger
+
+test:
+> go test ./...
+
+test-db: db-up
+> DATABASE_URL="$(DB_URL)" go test ./... -count=1
