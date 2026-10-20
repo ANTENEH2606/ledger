@@ -20,6 +20,8 @@ type Querier interface {
 	CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error)
 	GetAccount(ctx context.Context, id int64) (Account, error)
 	// Signed balance: positive = net debit, negative = net credit.
+	GetAccountBalance(ctx context.Context, accountID int64) (int64, error)
+	// Signed balance: positive = net debit, negative = net credit.
 	GetAccountBalanceAsOf(ctx context.Context, arg GetAccountBalanceAsOfParams) (int64, error)
 	GetAccountByCode(ctx context.Context, code string) (Account, error)
 	// ============================================================
@@ -40,6 +42,7 @@ type Querier interface {
 	// Locks the given accounts in a fixed order (by id) so that concurrent
 	// transfers cannot deadlock. Call inside the posting transaction.
 	LockAccountsForUpdate(ctx context.Context, ids []int64) ([]LockAccountsForUpdateRow, error)
+	SetAllowOverdraft(ctx context.Context, arg SetAllowOverdraftParams) error
 }
 
 var _ Querier = (*Queries)(nil)

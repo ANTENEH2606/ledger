@@ -17,6 +17,8 @@ import (
 var (
 	ErrUnknownAccount = errors.New("one or more accounts do not exist")
 	ErrMixedCurrency  = errors.New("all accounts in a transaction must share one currency")
+
+	ErrInsufficientFunds = errors.New("insufficient funds")
 )
 
 const maxAttempts = 3
@@ -101,7 +103,14 @@ func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error
 		return db.Transaction{}, fmt.Errorf("create transaction: %w", err)
 	}
 
-	// 3. Insert the entries.
+	// 3. Enforce "no overdraft" on accounts that forbid it. This reads
+	//    balances, which is exactly why the locks above matter: while we hold
+	//    them, nobody else can change these balances under us.
+	if err := checkFunds(ctx, q, accounts, in.Entries); err != nil {
+		return db.Transaction{}, err
+	}
+
+	// 4. Insert the entries.
 	for _, e := range in.Entries {
 		_, err := q.CreateEntry(ctx, db.CreateEntryParams{
 			TransactionID: t.ID,
@@ -113,12 +122,53 @@ func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error
 		}
 	}
 
-	// 4. Commit. The deferred balance trigger runs here and rejects the
+	// 5. Commit. The deferred balance trigger runs here and rejects the
 	//    whole transaction if the entries do not add up.
 	if err := tx.Commit(ctx); err != nil {
 		return db.Transaction{}, fmt.Errorf("commit: %w", err)
 	}
 	return t, nil
+}
+
+// checkFunds refuses the posting if it would push an account that forbids
+// overdraft onto the wrong side of zero. The accounts must already be locked.
+func checkFunds(ctx context.Context, q *db.Queries, accounts []db.LockAccountsForUpdateRow, entries []EntryInput) error {
+	delta := make(map[int64]int64)
+	for _, e := range entries {
+		delta[e.AccountID] += e.Amount
+	}
+
+	for _, a := range accounts {
+		if a.AllowOverdraft {
+			continue
+		}
+		balance, err := q.GetAccountBalance(ctx, a.ID)
+		if err != nil {
+			return fmt.Errorf("balance of account %d: %w", a.ID, err)
+		}
+		after, ok := addChecked(balance, delta[a.ID])
+		if !ok {
+			return ErrOverflow
+		}
+		if overdrawn(a.Type, after) {
+			return fmt.Errorf("%w: account %d", ErrInsufficientFunds, a.ID)
+		}
+	}
+	return nil
+}
+
+// overdrawn reports whether a signed balance (debit positive, credit negative)
+// is on the wrong side of zero for the account type.
+//
+//	asset, expense                 normal side is debit:  balance must not go below 0
+//	liability, equity, revenue     normal side is credit: balance must not go above 0
+func overdrawn(accountType string, balance int64) bool {
+	switch accountType {
+	case "asset", "expense":
+		return balance < 0
+	default:
+		return balance > 0
+	}
 }
 
 // accountIDs returns the distinct account ids used by the entries, sorted.

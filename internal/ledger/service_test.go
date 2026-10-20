@@ -23,6 +23,32 @@ func TestAccountIDs(t *testing.T) {
 	}
 }
 
+func TestOverdrawn(t *testing.T) {
+	tests := []struct {
+		name        string
+		accountType string
+		balance     int64
+		want        bool
+	}{
+		{"asset in the black", "asset", 500, false},
+		{"asset at zero", "asset", 0, false},
+		{"asset below zero", "asset", -1, true},
+		{"expense below zero", "expense", -1, true},
+		{"liability holding funds (credit balance)", "liability", -1000, false},
+		{"liability at zero", "liability", 0, false},
+		{"liability on the debit side", "liability", 1, true},
+		{"equity on the debit side", "equity", 1, true},
+		{"revenue on the debit side", "revenue", 1, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := overdrawn(tc.accountType, tc.balance); got != tc.want {
+				t.Fatalf("overdrawn(%q, %d) = %v, want %v", tc.accountType, tc.balance, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsRetryable(t *testing.T) {
 	tests := []struct {
 		name string

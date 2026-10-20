@@ -11,12 +11,13 @@ import (
 )
 
 type Account struct {
-	ID        int64     `json:"id"`
-	Code      string    `json:"code"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	Currency  string    `json:"currency"`
-	CreatedAt time.Time `json:"created_at"`
+	ID             int64     `json:"id"`
+	Code           string    `json:"code"`
+	Name           string    `json:"name"`
+	Type           string    `json:"type"`
+	Currency       string    `json:"currency"`
+	CreatedAt      time.Time `json:"created_at"`
+	AllowOverdraft bool      `json:"allow_overdraft"`
 }
 
 type Entry struct {
