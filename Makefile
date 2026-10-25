@@ -36,4 +36,4 @@ test:
 > go test ./...
 
 test-db: db-up
-> DATABASE_URL="$(DB_URL)" go test ./... -count=1
+> @DATABASE_URL="$(DB_URL)" go test ./... -count=1

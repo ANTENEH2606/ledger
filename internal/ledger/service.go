@@ -18,7 +18,8 @@ var (
 	ErrUnknownAccount = errors.New("one or more accounts do not exist")
 	ErrMixedCurrency  = errors.New("all accounts in a transaction must share one currency")
 
-	ErrInsufficientFunds = errors.New("insufficient funds")
+	ErrInsufficientFunds   = errors.New("insufficient funds")
+	ErrIdempotencyKeyReuse = errors.New("idempotency key already used with a different request")
 )
 
 const maxAttempts = 3
@@ -61,6 +62,7 @@ func (s *Service) PostTransaction(ctx context.Context, in PostInput) (db.Transac
 
 // post performs one attempt, inside a single database transaction.
 func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error) {
+	hash := requestHash(in)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return db.Transaction{}, fmt.Errorf("begin: %w", err)
@@ -91,12 +93,15 @@ func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error
 		IdempotencyKey: in.IdempotencyKey,
 		EffectiveDate:  in.EffectiveDate,
 		Description:    in.Description,
-		RequestHash:    requestHash(in),
+		RequestHash:    hash,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, getErr := q.GetTransactionByIdempotencyKey(ctx, in.IdempotencyKey)
 		if getErr != nil {
 			return db.Transaction{}, fmt.Errorf("load original transaction: %w", getErr)
+		}
+		if existing.RequestHash != "" && existing.RequestHash != hash {
+			return db.Transaction{}, ErrIdempotencyKeyReuse
 		}
 		return existing, nil
 	}

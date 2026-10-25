@@ -158,3 +158,54 @@ func TestPostTransaction_MixedCurrency(t *testing.T) {
 		t.Fatalf("got %v, want ErrMixedCurrency", err)
 	}
 }
+
+func TestPostTransaction_KeyReuseWithDifferentPayload(t *testing.T) {
+	svc, q := testEnv(t)
+	ctx := context.Background()
+
+	a := newAccount(t, q, "ETB")
+	b := newAccount(t, q, "ETB")
+	key := uniqueKey("reuse")
+
+	post := func(amount int64) (db.Transaction, error) {
+		return svc.PostTransaction(ctx, PostInput{
+			IdempotencyKey: key,
+			EffectiveDate:  time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC),
+			Entries: []EntryInput{
+				{AccountID: a.ID, Amount: -amount},
+				{AccountID: b.ID, Amount: amount},
+			},
+		})
+	}
+
+	// 1. First request succeeds.
+	first, err := post(100)
+	if err != nil {
+		t.Fatalf("first post: %v", err)
+	}
+
+	// 2. Same key, different amount: must be refused.
+	if _, err := post(500); !errors.Is(err, ErrIdempotencyKeyReuse) {
+		t.Fatalf("got %v, want ErrIdempotencyKeyReuse", err)
+	}
+
+	// 3. Nothing from the refused request was written.
+	var bal int64
+	err = svc.pool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(amount),0)::bigint FROM entries WHERE account_id = $1`, b.ID).Scan(&bal)
+	if err != nil {
+		t.Fatalf("balance: %v", err)
+	}
+	if bal != 100 {
+		t.Errorf("balance of B = %d, want 100", bal)
+	}
+
+	// 4. A genuine retry of the original request still works.
+	again, err := post(100)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if again.ID != first.ID {
+		t.Errorf("retry returned transaction %d, want %d", again.ID, first.ID)
+	}
+}
