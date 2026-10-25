@@ -91,6 +91,7 @@ func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error
 		IdempotencyKey: in.IdempotencyKey,
 		EffectiveDate:  in.EffectiveDate,
 		Description:    in.Description,
+		RequestHash:    requestHash(in),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, getErr := q.GetTransactionByIdempotencyKey(ctx, in.IdempotencyKey)

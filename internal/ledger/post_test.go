@@ -112,3 +112,72 @@ func TestValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestHash(t *testing.T) {
+	day := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+
+	base := PostInput{
+		IdempotencyKey: "k1",
+		EffectiveDate:  day,
+		Description:    "rent",
+		Entries: []EntryInput{
+			{AccountID: 1, Amount: -100},
+			{AccountID: 2, Amount: 100},
+		},
+	}
+
+	// with returns a copy of base after applying a change.
+	with := func(change func(in *PostInput)) PostInput {
+		in := base
+		in.Entries = append([]EntryInput(nil), base.Entries...)
+		change(&in)
+		return in
+	}
+
+	tests := []struct {
+		name  string
+		other PostInput
+		same  bool // true: hash must equal base's; false: must differ
+	}{
+		{"identical input", with(func(in *PostInput) {}), true},
+		{"entries in other order", with(func(in *PostInput) {
+			in.Entries[0], in.Entries[1] = in.Entries[1], in.Entries[0]
+		}), true},
+		{"different description", with(func(in *PostInput) { in.Description = "something else" }), true},
+		{"different time of day, same date", with(func(in *PostInput) {
+			in.EffectiveDate = day.Add(15 * time.Hour)
+		}), true},
+		{"different amount", with(func(in *PostInput) {
+			in.Entries[0].Amount, in.Entries[1].Amount = -500, 500
+		}), false},
+		{"different account", with(func(in *PostInput) { in.Entries[1].AccountID = 3 }), false},
+		{"different date", with(func(in *PostInput) { in.EffectiveDate = day.AddDate(0, 0, 1) }), false},
+		{"boundary shift (1:25 vs 12:5)", PostInput{
+			EffectiveDate: day,
+			Entries:       []EntryInput{{AccountID: 12, Amount: 5}, {AccountID: 1, Amount: -5}},
+		}, false},
+	}
+
+	want := requestHash(base)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := requestHash(tc.other)
+			if tc.same && got != want {
+				t.Errorf("hash changed but should be the same")
+			}
+			if !tc.same && got == want {
+				t.Errorf("hash is the same but should differ")
+			}
+		})
+	}
+
+	// It must not reorder the caller's slice.
+	in := with(func(in *PostInput) {
+		in.Entries[0], in.Entries[1] = in.Entries[1], in.Entries[0]
+	})
+	first := in.Entries[0]
+	requestHash(in)
+	if in.Entries[0] != first {
+		t.Errorf("requestHash reordered the caller's entries")
+	}
+}

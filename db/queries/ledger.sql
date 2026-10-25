@@ -44,8 +44,8 @@ SELECT * FROM transactions WHERE idempotency_key = $1;
 -- name: CreateTransaction :one
 -- ON CONFLICT DO NOTHING returns no row when the key already exists
 -- (a retried request); the caller then loads the original transaction.
-INSERT INTO transactions (idempotency_key, effective_date, description, reverses_transaction_id)
-VALUES ($1, $2, $3, $4)
+INSERT INTO transactions (idempotency_key, effective_date, description, reverses_transaction_id,request_hash)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING *;
  

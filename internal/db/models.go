@@ -35,4 +35,5 @@ type Transaction struct {
 	Description           string      `json:"description"`
 	ReversesTransactionID pgtype.Int8 `json:"reverses_transaction_id"`
 	CreatedAt             time.Time   `json:"created_at"`
+	RequestHash           string      `json:"request_hash"`
 }

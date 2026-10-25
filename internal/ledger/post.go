@@ -1,8 +1,13 @@
 package ledger
 
 import (
+	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 )
@@ -62,4 +67,30 @@ func addChecked(a, b int64) (int64, bool) {
 		return 0, false
 	}
 	return a + b, true
+}
+
+// requestHash fingerprints what the client asked for: the entries and the
+// effective date. It leaves out Description and anything the server generates.
+func requestHash(in PostInput) string {
+	// Copy so we never reorder the caller's slice.
+	entries := slices.Clone(in.Entries)
+
+	// Same entries in any order must give the same hash.
+	// an order-independent hash is the whole point, so [A,B] and [B,A] must match
+	slices.SortFunc(entries, func(a, b EntryInput) int {
+		if c := cmp.Compare(a.AccountID, b.AccountID); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Amount, b.Amount)
+	})
+
+	var b strings.Builder
+	b.WriteString("ledger/request/v1|")                  // version tag (domain separation)
+	b.WriteString(in.EffectiveDate.Format("2006-01-02")) // this keeps only the date. A different time of day on the same date gives the same hash
+	for _, e := range entries {
+		fmt.Fprintf(&b, "|%d:%d", e.AccountID, e.Amount) // the | and : separators keep account 1, amount 25 apart from account 12, amount 5
+	}
+	text := b.String()
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }

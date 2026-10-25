@@ -75,10 +75,10 @@ func (q *Queries) CreateEntry(ctx context.Context, arg CreateEntryParams) (Entry
 }
 
 const createTransaction = `-- name: CreateTransaction :one
-INSERT INTO transactions (idempotency_key, effective_date, description, reverses_transaction_id)
-VALUES ($1, $2, $3, $4)
+INSERT INTO transactions (idempotency_key, effective_date, description, reverses_transaction_id,request_hash)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, idempotency_key, effective_date, description, reverses_transaction_id, created_at
+RETURNING id, idempotency_key, effective_date, description, reverses_transaction_id, created_at, request_hash
 `
 
 type CreateTransactionParams struct {
@@ -86,6 +86,7 @@ type CreateTransactionParams struct {
 	EffectiveDate         time.Time   `json:"effective_date"`
 	Description           string      `json:"description"`
 	ReversesTransactionID pgtype.Int8 `json:"reverses_transaction_id"`
+	RequestHash           string      `json:"request_hash"`
 }
 
 // ON CONFLICT DO NOTHING returns no row when the key already exists
@@ -96,6 +97,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		arg.EffectiveDate,
 		arg.Description,
 		arg.ReversesTransactionID,
+		arg.RequestHash,
 	)
 	var i Transaction
 	err := row.Scan(
@@ -105,6 +107,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		&i.Description,
 		&i.ReversesTransactionID,
 		&i.CreatedAt,
+		&i.RequestHash,
 	)
 	return i, err
 }
@@ -235,7 +238,7 @@ func (q *Queries) GetAccountStatement(ctx context.Context, accountID int64) ([]G
 }
 
 const getTransaction = `-- name: GetTransaction :one
-SELECT id, idempotency_key, effective_date, description, reverses_transaction_id, created_at FROM transactions WHERE id = $1
+SELECT id, idempotency_key, effective_date, description, reverses_transaction_id, created_at, request_hash FROM transactions WHERE id = $1
 `
 
 func (q *Queries) GetTransaction(ctx context.Context, id int64) (Transaction, error) {
@@ -248,13 +251,14 @@ func (q *Queries) GetTransaction(ctx context.Context, id int64) (Transaction, er
 		&i.Description,
 		&i.ReversesTransactionID,
 		&i.CreatedAt,
+		&i.RequestHash,
 	)
 	return i, err
 }
 
 const getTransactionByIdempotencyKey = `-- name: GetTransactionByIdempotencyKey :one
  
-SELECT id, idempotency_key, effective_date, description, reverses_transaction_id, created_at FROM transactions WHERE idempotency_key = $1
+SELECT id, idempotency_key, effective_date, description, reverses_transaction_id, created_at, request_hash FROM transactions WHERE idempotency_key = $1
 `
 
 // ============================================================
@@ -270,6 +274,7 @@ func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, idempotenc
 		&i.Description,
 		&i.ReversesTransactionID,
 		&i.CreatedAt,
+		&i.RequestHash,
 	)
 	return i, err
 }
