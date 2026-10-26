@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
+	"net/http"
 	"os"
 
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -19,13 +20,19 @@ func main() {
 
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
-		log.Fatalf("connect failed: %v", err)
+		log.Fatalf("connect: %v", err)
 	}
 	defer pool.Close()
 
-	var n int
-	if err := pool.QueryRow(ctx, "SELECT 1").Scan(&n); err != nil {
-		log.Fatalf("query failed: %v", err)
-	}
-	fmt.Println(n)
+	r := gin.Default()
+	r.SetTrustedProxies(nil)
+	r.GET("/health", func(c *gin.Context) {
+		if err := pool.Ping(c.Request.Context()); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "db down"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	log.Fatal(r.Run(":8080"))
 }
