@@ -8,6 +8,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"ledger/internal/api"
+	"ledger/internal/db"
+	"ledger/internal/ledger"
 )
 
 func main() {
@@ -24,8 +28,11 @@ func main() {
 	}
 	defer pool.Close()
 
-	r := gin.Default()
-	r.SetTrustedProxies(nil)
+	q := db.New(pool)
+	svc := ledger.NewService(pool)
+	srv := api.NewServer(q, svc)
+
+	r := srv.Routes()
 	r.GET("/health", func(c *gin.Context) {
 		if err := pool.Ping(c.Request.Context()); err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "db down"})
