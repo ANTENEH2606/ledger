@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,8 @@ func (s *Server) Routes() *gin.Engine {
 	r.POST("/accounts", s.createAccount)
 	r.POST("/transactions", s.postTransaction)
 	r.GET("/accounts/:id/statement", s.getStatement)
+	r.GET("/accounts/:id/balance", s.getBalance)
+	r.GET("/trial-balance", s.getTrialBalance)
 	return r
 }
 
@@ -170,5 +173,109 @@ func (s *Server) getStatement(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"account":   acc,
 		"statement": rows,
+	})
+}
+
+// parseAsOf reads ?as_of=YYYY-MM-DD; empty means today.
+func parseAsOf(c *gin.Context) (time.Time, error) {
+	v := c.Query("as_of")
+	if v == "" {
+		return time.Now(), nil
+	}
+	return time.Parse("2006-01-02", v)
+}
+
+type currencyTotals struct {
+	Currency     string `json:"currency"`
+	TotalDebits  int64  `json:"total_debits"`
+	TotalCredits int64  `json:"total_credits"`
+	Balanced     bool   `json:"balanced"`
+}
+
+func (s *Server) getTrialBalance(c *gin.Context) {
+	asOf, err := parseAsOf(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "as_of must be YYYY-MM-DD"})
+		return
+	}
+
+	rows, err := s.q.GetTrialBalance(c.Request.Context(), asOf)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	// Totals per currency, computed from the very rows we return,
+	// so the totals always match what the client sees.
+	byCurrency := make(map[string]*currencyTotals)
+	for _, r := range rows {
+		t, ok := byCurrency[r.Currency]
+		if !ok {
+			t = &currencyTotals{Currency: r.Currency}
+			byCurrency[r.Currency] = t
+		}
+		t.TotalDebits += r.TotalDebits
+		t.TotalCredits += r.TotalCredits
+	}
+
+	totals := make([]currencyTotals, 0, len(byCurrency))
+	for _, t := range byCurrency {
+		t.Balanced = t.TotalDebits == t.TotalCredits
+		totals = append(totals, *t)
+	}
+	slices.SortFunc(totals, func(a, b currencyTotals) int {
+		return strings.Compare(a.Currency, b.Currency)
+	})
+
+	if rows == nil {
+		rows = []db.GetTrialBalanceRow{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"as_of":    asOf.Format("2006-01-02"),
+		"accounts": rows,
+		"totals":   totals,
+	})
+}
+
+func (s *Server) getBalance(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid account id"})
+		return
+	}
+
+	asOf, err := parseAsOf(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "as_of must be YYYY-MM-DD"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	acc, err := s.q.GetAccount(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	balance, err := s.q.GetAccountBalanceAsOf(ctx, db.GetAccountBalanceAsOfParams{
+		AccountID: id,
+		AsOf:      asOf,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"account_id": acc.ID,
+		"currency":   acc.Currency,
+		"as_of":      asOf.Format("2006-01-02"),
+		"balance":    balance, // minor units; positive = net debit, negative = net credit
 	})
 }
