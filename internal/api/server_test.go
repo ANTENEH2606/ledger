@@ -143,3 +143,85 @@ func TestStatement_NotFound(t *testing.T) {
 		t.Fatalf("got %d, want 404: %s", w.Code, w.Body)
 	}
 }
+
+func TestTrialBalance_Balanced(t *testing.T) {
+	r := testRouter(t)
+
+	w := do(r, "GET", "/trial-balance", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+
+	// Decode only the totals; the account list can be huge.
+	var resp struct {
+		Totals []struct {
+			Currency     string `json:"currency"`
+			TotalDebits  int64  `json:"total_debits"`
+			TotalCredits int64  `json:"total_credits"`
+			Balanced     bool   `json:"balanced"`
+		} `json:"totals"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	for _, tot := range resp.Totals {
+		if tot.TotalDebits != tot.TotalCredits {
+			t.Errorf("%s: debits %d != credits %d", tot.Currency, tot.TotalDebits, tot.TotalCredits)
+		}
+		if !tot.Balanced {
+			t.Errorf("%s: balanced = false", tot.Currency)
+		}
+	}
+}
+
+func TestTrialBalance_BadDate(t *testing.T) {
+	r := testRouter(t)
+
+	w := do(r, "GET", "/trial-balance?as_of=nope", "", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", w.Code, w.Body)
+	}
+}
+
+// balanceOf reads an account's balance through the API.
+func balanceOf(t *testing.T, r http.Handler, id int64, asOf string) int64 {
+	t.Helper()
+
+	path := fmt.Sprintf("/accounts/%d/balance?as_of=%s", id, asOf)
+	w := do(r, "GET", path, "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("balance of %d: got %d, want 200: %s", id, w.Code, w.Body)
+	}
+
+	var resp struct {
+		Balance int64 `json:"balance"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode balance: %v", err)
+	}
+	return resp.Balance
+}
+
+func TestBalance_AfterPosting(t *testing.T) {
+	r := testRouter(t)
+	a, b := newAPIAccount(t, r), newAPIAccount(t, r)
+
+	h := map[string]string{"Idempotency-Key": uniqueKey("bal")}
+	if w := do(r, "POST", "/transactions", txBody(a, b, 10000, -10000), h); w.Code != http.StatusCreated {
+		t.Fatalf("post: got %d, want 201: %s", w.Code, w.Body)
+	}
+
+	// txBody posts on 2026-10-27, so that date includes the transaction.
+	if got := balanceOf(t, r, a, "2026-10-27"); got != 10000 {
+		t.Errorf("balance of a = %d, want 10000", got)
+	}
+	if got := balanceOf(t, r, b, "2026-10-27"); got != -10000 {
+		t.Errorf("balance of b = %d, want -10000", got)
+	}
+
+	// The day before the effective date, nothing had happened yet.
+	if got := balanceOf(t, r, a, "2026-10-26"); got != 0 {
+		t.Errorf("balance of a on 2026-10-26 = %d, want 0", got)
+	}
+}
