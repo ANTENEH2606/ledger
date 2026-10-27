@@ -1,7 +1,8 @@
 .RECIPEPREFIX = >
 DB_URL ?= $(shell grep '^DATABASE_URL=' .env | cut -d= -f2-)
+TEST_DB_URL ?= $(shell grep '^TEST_DATABASE_URL=' .env | cut -d= -f2-)
 
-.PHONY: run build tidy db-up migrate-up migrate-down migrate-new migrate-status psql test test-db
+.PHONY: run build tidy db-up migrate-up migrate-down migrate-new migrate-status psql test test-db test-db-migrate
 
 run:
 > @DATABASE_URL="$(DB_URL)"  go run main.go
@@ -27,7 +28,7 @@ migrate-status: db-up
 
 migrate-new:
 > @read -p "migration name: " name; \
-> @migrate create -ext sql -dir db/migrations -seq $$name
+> migrate create -ext sql -dir db/migrations -seq $$name
 
 psql: db-up
 > docker exec -it ledger psql -U ledger -d ledger
@@ -35,5 +36,8 @@ psql: db-up
 test:
 > go test ./...
 
+test-db-migrate: db-up
+> @migrate -path db/migrations -database "$(TEST_DB_URL)" up
+
 test-db: db-up
-> @DATABASE_URL="$(DB_URL)" go test ./... -count=1
+> @DATABASE_URL="$(TEST_DB_URL)" go test ./... -count=1
