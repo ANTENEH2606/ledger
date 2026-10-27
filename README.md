@@ -1,3 +1,5 @@
+![CI](https://github.com/ANTENEH2606/ledger/actions/workflows/ci.yml/badge.svg)
+
 # Ledger
 
 A double-entry ledger service written in Go, backed by PostgreSQL. The goal is a ledger that stays correct under retries and concurrent requests: money is never lost, never double-posted, and every transaction balances.
