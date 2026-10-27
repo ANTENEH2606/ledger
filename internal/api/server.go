@@ -3,10 +3,12 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"ledger/internal/db"
@@ -28,6 +30,7 @@ func (s *Server) Routes() *gin.Engine {
 
 	r.POST("/accounts", s.createAccount)
 	r.POST("/transactions", s.postTransaction)
+	r.GET("/accounts/:id/statement", s.getStatement)
 	return r
 }
 
@@ -134,4 +137,38 @@ func mapError(err error) (int, string) {
 	default:
 		return http.StatusInternalServerError, "internal error"
 	}
+}
+
+func (s *Server) getStatement(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid account id"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	acc, err := s.q.GetAccount(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	rows, err := s.q.GetAccountStatement(ctx, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if rows == nil {
+		rows = []db.GetAccountStatementRow{} // so JSON shows [] instead of null
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"account":   acc,
+		"statement": rows,
+	})
 }
