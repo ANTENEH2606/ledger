@@ -44,4 +44,4 @@ services:
 
 volumes:
   ledger_data:
-    external: true
+    name: ledger_data
