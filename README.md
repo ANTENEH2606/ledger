@@ -146,6 +146,8 @@ ledger/
   Makefile                 common commands
   sqlc.yaml                sqlc configuration
   .env.example             template for local configuration
+  .gitignore               keeps .env and other private files out of Git
+  .dockerignore            keeps .env and .git out of the Docker image
   db/
     migrations/            schema, constraints, triggers
     queries/ledger.sql     SQL that sqlc turns into Go
