@@ -280,20 +280,17 @@ func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, idempotenc
 }
 
 const getTrialBalance = `-- name: GetTrialBalance :many
-SELECT
-    a.id,
-    a.code,
-    a.name,
-    a.type,
-    a.currency,
-    COALESCE(SUM(e.amount) FILTER (WHERE e.amount > 0), 0)::bigint  AS total_debits,
-    COALESCE(-SUM(e.amount) FILTER (WHERE e.amount < 0), 0)::bigint AS total_credits,
-    COALESCE(SUM(e.amount), 0)::bigint                              AS balance
+SELECT    a.id, a.code, a.name, a.type, a.currency,
+    COALESCE(SUM(x.amount) FILTER (WHERE x.amount > 0), 0)::bigint  AS total_debits,
+    COALESCE(-SUM(x.amount) FILTER (WHERE x.amount < 0), 0)::bigint AS total_credits,
+    COALESCE(SUM(x.amount), 0)::bigint                              AS balance
 FROM accounts a
-LEFT JOIN entries e ON e.account_id = a.id
-LEFT JOIN transactions t ON t.id = e.transaction_id
-                        AND t.effective_date <= $1::date
-WHERE e.id IS NULL OR t.id IS NOT NULL
+LEFT JOIN (
+    SELECT e.account_id, e.amount
+    FROM entries e
+    JOIN transactions t ON t.id = e.transaction_id
+    WHERE t.effective_date <= $1::date
+) x ON x.account_id = a.id
 GROUP BY a.id, a.code, a.name, a.type, a.currency
 ORDER BY a.code
 `
