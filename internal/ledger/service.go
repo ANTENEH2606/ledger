@@ -40,6 +40,11 @@ func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{pool: pool}
 }
 
+// Ping checks that the database is reachable.
+func (s *Service) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
 // PostTransaction validates the request and writes the transaction and all
 // its entries atomically. Posting the same idempotency key again returns the
 // original transaction and writes nothing new.

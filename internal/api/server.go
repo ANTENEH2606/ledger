@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"slices"
@@ -34,6 +35,7 @@ func (s *Server) Routes() *gin.Engine {
 	r.GET("/accounts/:id/statement", s.getStatement)
 	r.GET("/accounts/:id/balance", s.getBalance)
 	r.GET("/trial-balance", s.getTrialBalance)
+	r.GET("/health", s.health)
 	return r
 }
 
@@ -43,6 +45,17 @@ type createAccountRequest struct {
 	Type           string `json:"type" binding:"required,oneof=asset liability equity revenue expense"`
 	Currency       string `json:"currency" binding:"required,len=3"`
 	AllowOverdraft *bool  `json:"allow_overdraft"`
+}
+
+func (s *Server) health(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second) //The 2-second timeout means a hung database makes the health check fail quickly instead of hanging with it
+	defer cancel()
+
+	if err := s.svc.Ping(ctx); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "db down"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 func (s *Server) createAccount(c *gin.Context) {

@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ledger/internal/api"
@@ -15,31 +18,54 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
+func run() error {
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
-		log.Fatal("DATABASE_URL is not set")
+		return errors.New("DATABASE_URL is not set")
 	}
 
-	pool, err := pgxpool.New(ctx, url)
+	// The pool uses its own context, so Ctrl+C does not cut off in-flight postings.
+	pool, err := pgxpool.New(context.Background(), url)
 	if err != nil {
-		log.Fatalf("connect: %v", err)
+		return err
 	}
 	defer pool.Close()
 
-	q := db.New(pool)
-	svc := ledger.NewService(pool)
-	srv := api.NewServer(q, svc)
+	srv := api.NewServer(db.New(pool), ledger.NewService(pool))
 
-	r := srv.Routes()
-	r.GET("/health", func(c *gin.Context) {
-		if err := pool.Ping(c.Request.Context()); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "db down"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+	httpSrv := &http.Server{
+		Addr:              ":8080",
+		Handler:           srv.Routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
-	log.Fatal(r.Run(":8080"))
+	// Cancelled on Ctrl+C (SIGINT) or SIGTERM (what `docker compose stop` sends).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- httpSrv.ListenAndServe() }()
+
+	select {
+	case err := <-errCh:
+		return err // the server failed on its own (for example, port already in use)
+	case <-ctx.Done():
+	}
+
+	log.Println("shutting down: finishing in-flight requests")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		return err
+	}
+	log.Println("stopped cleanly")
+	return nil
 }

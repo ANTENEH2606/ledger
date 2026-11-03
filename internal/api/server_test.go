@@ -342,3 +342,14 @@ func TestPostTransaction_ResponseHidesRequestHash(t *testing.T) {
 		t.Errorf("response exposes request_hash: %s", w.Body)
 	}
 }
+
+func TestHealth(t *testing.T) {
+	r := testRouter(t)
+	w := do(r, "GET", "/health", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), `"status":"ok"`) {
+		t.Errorf("unexpected body: %s", w.Body)
+	}
+}
