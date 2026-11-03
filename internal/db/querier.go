@@ -29,6 +29,9 @@ type Querier interface {
 	// ============================================================
 	// Every entry on an account with a running balance (oldest first).
 	GetAccountStatement(ctx context.Context, accountID int64) ([]GetAccountStatementRow, error)
+	// One page of the statement, oldest first. The running balance covers the
+	// whole history; the cursor (date, id) only chooses which rows to return.
+	GetAccountStatementPage(ctx context.Context, arg GetAccountStatementPageParams) ([]GetAccountStatementPageRow, error)
 	GetTransaction(ctx context.Context, id int64) (Transaction, error)
 	// ============================================================
 	// Transactions and entries

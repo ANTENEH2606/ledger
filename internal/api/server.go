@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -209,18 +210,51 @@ func (s *Server) getStatement(c *gin.Context) {
 		return
 	}
 
-	rows, err := s.q.GetAccountStatement(ctx, id)
+	limit, err := parsePageSize(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("limit must be between 1 and %d", maxPageSize)})
+		return
+	}
+
+	params := db.GetAccountStatementPageParams{
+		AccountID: id,
+		UseCursor: false,
+		AfterDate: time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC), // ignored while UseCursor is false
+		AfterID:   0,
+		PageSize:  int32(limit + 1), // one extra row tells us whether there is a next page
+	}
+	if cur := c.Query("cursor"); cur != "" {
+		date, entryID, err := parseCursor(cur)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid cursor"})
+			return
+		}
+		params.UseCursor = true
+		params.AfterDate = date
+		params.AfterID = entryID
+	}
+
+	rows, err := s.q.GetAccountStatementPage(ctx, params)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
+
+	var next *string
+	if len(rows) > limit {
+		rows = rows[:limit]
+		last := rows[len(rows)-1]
+		n := fmt.Sprintf("%s_%d", last.EffectiveDate.Format("2006-01-02"), last.ID)
+		next = &n
+	}
 	if rows == nil {
-		rows = []db.GetAccountStatementRow{} // so JSON shows [] instead of null
+		rows = []db.GetAccountStatementPageRow{} // so JSON shows [] instead of null
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"account":   acc,
-		"statement": rows,
+		"account":     acc,
+		"statement":   rows,
+		"next_cursor": next, // null on the last page
 	})
 }
 
@@ -326,4 +360,38 @@ func (s *Server) getBalance(c *gin.Context) {
 		"as_of":      asOf.Format("2006-01-02"),
 		"balance":    balance, // minor units; positive = net debit, negative = net credit
 	})
+}
+
+const (
+	defaultPageSize = 50
+	maxPageSize     = 200
+)
+
+func parsePageSize(c *gin.Context) (int, error) {
+	v := c.Query("limit")
+	if v == "" {
+		return defaultPageSize, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > maxPageSize {
+		return 0, errors.New("bad limit")
+	}
+	return n, nil
+}
+
+// A cursor looks like "2026-10-27_123": the date and id of the last entry on the previous page.
+func parseCursor(v string) (time.Time, int64, error) {
+	datePart, idPart, ok := strings.Cut(v, "_")
+	if !ok {
+		return time.Time{}, 0, errors.New("bad cursor")
+	}
+	date, err := time.Parse("2006-01-02", datePart)
+	if err != nil {
+		return time.Time{}, 0, err
+	}
+	id, err := strconv.ParseInt(idPart, 10, 64)
+	if err != nil {
+		return time.Time{}, 0, err
+	}
+	return date, id, nil
 }

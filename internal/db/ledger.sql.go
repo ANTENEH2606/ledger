@@ -239,6 +239,75 @@ func (q *Queries) GetAccountStatement(ctx context.Context, accountID int64) ([]G
 	return items, nil
 }
 
+const getAccountStatementPage = `-- name: GetAccountStatementPage :many
+SELECT s.id, s.effective_date, s.description, s.amount, s.running_balance
+FROM (
+    SELECT
+        e.id,
+        t.effective_date,
+        t.description,
+        e.amount,
+        (SUM(e.amount) OVER (ORDER BY t.effective_date, e.id))::bigint AS running_balance
+    FROM entries e
+    JOIN transactions t ON t.id = e.transaction_id
+    WHERE e.account_id = $1
+) s
+WHERE NOT $2::bool
+   OR (s.effective_date, s.id) > ($3::date, $4::bigint)
+ORDER BY s.effective_date, s.id
+LIMIT $5::int
+`
+
+type GetAccountStatementPageParams struct {
+	AccountID int64     `json:"account_id"`
+	UseCursor bool      `json:"use_cursor"`
+	AfterDate time.Time `json:"after_date"`
+	AfterID   int64     `json:"after_id"`
+	PageSize  int32     `json:"page_size"`
+}
+
+type GetAccountStatementPageRow struct {
+	ID             int64     `json:"id"`
+	EffectiveDate  time.Time `json:"effective_date"`
+	Description    string    `json:"description"`
+	Amount         int64     `json:"amount"`
+	RunningBalance int64     `json:"running_balance"`
+}
+
+// One page of the statement, oldest first. The running balance covers the
+// whole history; the cursor (date, id) only chooses which rows to return.
+func (q *Queries) GetAccountStatementPage(ctx context.Context, arg GetAccountStatementPageParams) ([]GetAccountStatementPageRow, error) {
+	rows, err := q.db.Query(ctx, getAccountStatementPage,
+		arg.AccountID,
+		arg.UseCursor,
+		arg.AfterDate,
+		arg.AfterID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetAccountStatementPageRow
+	for rows.Next() {
+		var i GetAccountStatementPageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.EffectiveDate,
+			&i.Description,
+			&i.Amount,
+			&i.RunningBalance,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getTransaction = `-- name: GetTransaction :one
 SELECT id, idempotency_key, effective_date, description, reverses_transaction_id, created_at, request_hash FROM transactions WHERE id = $1
 `

@@ -353,3 +353,69 @@ func TestHealth(t *testing.T) {
 		t.Errorf("unexpected body: %s", w.Body)
 	}
 }
+
+func TestStatement_Pagination(t *testing.T) {
+	r := testRouter(t)
+	a, b := newAPIAccount(t, r), newAPIAccount(t, r)
+
+	for i := 0; i < 5; i++ {
+		h := map[string]string{"Idempotency-Key": uniqueKey(fmt.Sprintf("pg%d", i))}
+		if w := do(r, "POST", "/transactions", txBody(a, b, 100, -100), h); w.Code != http.StatusCreated {
+			t.Fatalf("post %d: got %d: %s", i, w.Code, w.Body)
+		}
+	}
+
+	type page struct {
+		Statement []struct {
+			ID             int64 `json:"id"`
+			RunningBalance int64 `json:"running_balance"`
+		} `json:"statement"`
+		NextCursor *string `json:"next_cursor"`
+	}
+
+	var seen []int64
+	var lastBalance int64
+	path := fmt.Sprintf("/accounts/%d/statement?limit=2", a)
+	for i := 0; i < 10; i++ {
+		w := do(r, "GET", path, "", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("got %d: %s", w.Code, w.Body)
+		}
+		var p page
+		if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range p.Statement {
+			seen = append(seen, row.ID)
+			lastBalance = row.RunningBalance
+		}
+		if p.NextCursor == nil {
+			break
+		}
+		path = fmt.Sprintf("/accounts/%d/statement?limit=2&cursor=%s", a, *p.NextCursor)
+	}
+
+	if len(seen) != 5 {
+		t.Fatalf("saw %d entries over all pages, want 5: %v", len(seen), seen)
+	}
+	for i := 1; i < len(seen); i++ {
+		if seen[i] <= seen[i-1] {
+			t.Errorf("entries not strictly increasing: %v", seen)
+		}
+	}
+	if lastBalance != 500 {
+		t.Errorf("running balance on the last page = %d, want 500", lastBalance)
+	}
+}
+
+func TestStatement_BadPagingParams(t *testing.T) {
+	r := testRouter(t)
+	a := newAPIAccount(t, r)
+
+	for _, q := range []string{"limit=0", "limit=1000", "limit=abc", "cursor=garbage", "cursor=2026-13-45_1"} {
+		w := do(r, "GET", fmt.Sprintf("/accounts/%d/statement?%s", a, q), "", nil)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400: %s", q, w.Code, w.Body)
+		}
+	}
+}

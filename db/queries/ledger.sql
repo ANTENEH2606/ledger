@@ -76,6 +76,26 @@ FROM entries e
 JOIN transactions t ON t.id = e.transaction_id
 WHERE e.account_id = $1
 ORDER BY t.effective_date, e.id;
+
+-- name: GetAccountStatementPage :many
+-- One page of the statement, oldest first. The running balance covers the
+-- whole history; the cursor (date, id) only chooses which rows to return.
+SELECT s.id, s.effective_date, s.description, s.amount, s.running_balance
+FROM (
+    SELECT
+        e.id,
+        t.effective_date,
+        t.description,
+        e.amount,
+        (SUM(e.amount) OVER (ORDER BY t.effective_date, e.id))::bigint AS running_balance
+    FROM entries e
+    JOIN transactions t ON t.id = e.transaction_id
+    WHERE e.account_id = @account_id
+) s
+WHERE NOT @use_cursor::bool
+   OR (s.effective_date, s.id) > (@after_date::date, @after_id::bigint)
+ORDER BY s.effective_date, s.id
+LIMIT @page_size::int;
  
 -- name: GetAccountBalanceAsOf :one
 -- Signed balance: positive = net debit, negative = net credit.
@@ -111,3 +131,4 @@ SELECT EXISTS (
     WHERE e.account_id = @account_id
       AND t.effective_date > @on_date::date
 ) AS found;
+
