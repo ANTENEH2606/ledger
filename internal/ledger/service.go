@@ -25,6 +25,13 @@ var (
 
 const maxAttempts = 3
 
+// PostResult is the posted transaction plus whether this call was a replay
+// of an earlier request with the same idempotency key.
+type PostResult struct {
+	db.Transaction
+	Replayed bool
+}
+
 type Service struct {
 	pool *pgxpool.Pool
 }
@@ -39,9 +46,9 @@ func NewService(pool *pgxpool.Pool) *Service {
 //
 // Deadlocks (40P01) and serialization failures (40001) are retried a few
 // times; every other error is returned immediately.
-func (s *Service) PostTransaction(ctx context.Context, in PostInput) (db.Transaction, error) {
+func (s *Service) PostTransaction(ctx context.Context, in PostInput) (PostResult, error) {
 	if err := validate(in); err != nil {
-		return db.Transaction{}, err
+		return PostResult{}, err
 	}
 
 	var lastErr error
@@ -54,19 +61,19 @@ func (s *Service) PostTransaction(ctx context.Context, in PostInput) (db.Transac
 
 		select {
 		case <-ctx.Done():
-			return db.Transaction{}, ctx.Err()
+			return PostResult{}, ctx.Err()
 		case <-time.After(time.Duration(attempt) * 20 * time.Millisecond):
 		}
 	}
-	return db.Transaction{}, fmt.Errorf("giving up after %d attempts: %w", maxAttempts, lastErr)
+	return PostResult{}, fmt.Errorf("giving up after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // post performs one attempt, inside a single database transaction.
-func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error) {
+func (s *Service) post(ctx context.Context, in PostInput) (PostResult, error) {
 	hash := requestHash(in)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return db.Transaction{}, fmt.Errorf("begin: %w", err)
+		return PostResult{}, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx) // harmless after a successful Commit
 
@@ -77,14 +84,14 @@ func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error
 	ids := accountIDs(in.Entries)
 	accounts, err := q.LockAccountsForUpdate(ctx, ids)
 	if err != nil {
-		return db.Transaction{}, fmt.Errorf("lock accounts: %w", err)
+		return PostResult{}, fmt.Errorf("lock accounts: %w", err)
 	}
 	if len(accounts) != len(ids) {
-		return db.Transaction{}, ErrUnknownAccount
+		return PostResult{}, ErrUnknownAccount
 	}
 	for _, a := range accounts[1:] {
 		if a.Currency != accounts[0].Currency {
-			return db.Transaction{}, ErrMixedCurrency
+			return PostResult{}, ErrMixedCurrency
 		}
 	}
 
@@ -99,22 +106,22 @@ func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, getErr := q.GetTransactionByIdempotencyKey(ctx, in.IdempotencyKey)
 		if getErr != nil {
-			return db.Transaction{}, fmt.Errorf("load original transaction: %w", getErr)
+			return PostResult{}, fmt.Errorf("load original transaction: %w", getErr)
 		}
 		if existing.RequestHash != "" && existing.RequestHash != hash {
-			return db.Transaction{}, ErrIdempotencyKeyReuse
+			return PostResult{}, ErrIdempotencyKeyReuse
 		}
-		return existing, nil
+		return PostResult{Transaction: existing, Replayed: true}, nil
 	}
 	if err != nil {
-		return db.Transaction{}, fmt.Errorf("create transaction: %w", err)
+		return PostResult{}, fmt.Errorf("create transaction: %w", err)
 	}
 
 	// 3. Enforce "no overdraft" on accounts that forbid it. This reads
 	//    balances, which is exactly why the locks above matter: while we hold
 	//    them, nobody else can change these balances under us.
 	if err := checkFunds(ctx, q, accounts, in.Entries, in.EffectiveDate); err != nil {
-		return db.Transaction{}, err
+		return PostResult{}, err
 	}
 
 	// 4. Insert the entries.
@@ -125,16 +132,16 @@ func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error
 			Amount:        e.Amount,
 		})
 		if err != nil {
-			return db.Transaction{}, fmt.Errorf("create entry: %w", err)
+			return PostResult{}, fmt.Errorf("create entry: %w", err)
 		}
 	}
 
 	// 5. Commit. The deferred balance trigger runs here and rejects the
 	//    whole transaction if the entries do not add up.
 	if err := tx.Commit(ctx); err != nil {
-		return db.Transaction{}, fmt.Errorf("commit: %w", err)
+		return PostResult{}, fmt.Errorf("commit: %w", err)
 	}
-	return t, nil
+	return PostResult{Transaction: t, Replayed: false}, nil
 }
 
 // checkFunds refuses the posting if it would push an account that forbids

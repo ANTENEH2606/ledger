@@ -129,9 +129,9 @@ func TestPostTransaction_KeyReuse(t *testing.T) {
 	if w := do(r, "POST", "/transactions", txBody(a, b, 500, -500), h); w.Code != http.StatusConflict {
 		t.Fatalf("reuse with different amount: got %d, want 409: %s", w.Code, w.Body)
 	}
-	// A genuine retry of the original request still succeeds.
-	if w := do(r, "POST", "/transactions", txBody(a, b, 100, -100), h); w.Code != http.StatusCreated {
-		t.Fatalf("retry: got %d, want 201: %s", w.Code, w.Body)
+	// A genuine retry of the original request returns the original, with 200 (not 201).
+	if w := do(r, "POST", "/transactions", txBody(a, b, 100, -100), h); w.Code != http.StatusOK {
+		t.Fatalf("retry: got %d, want 200: %s", w.Code, w.Body)
 	}
 }
 
@@ -289,5 +289,56 @@ func TestPostTransaction_NoOverdraftWallet(t *testing.T) {
 	w := do(r, "POST", "/transactions", txBody(other, wallet, 150, -150), h)
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("overdraw: got %d, want 422: %s", w.Code, w.Body)
+	}
+}
+
+func TestPostTransaction_ReplayReturns200(t *testing.T) {
+	r := testRouter(t)
+	a, b := newAPIAccount(t, r), newAPIAccount(t, r)
+
+	h := map[string]string{"Idempotency-Key": uniqueKey("replay")}
+	body := txBody(a, b, 100, -100)
+
+	first := do(r, "POST", "/transactions", body, h)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first: got %d, want 201: %s", first.Code, first.Body)
+	}
+	second := do(r, "POST", "/transactions", body, h) // same key, same body: a network retry
+	if second.Code != http.StatusOK {
+		t.Fatalf("replay: got %d, want 200: %s", second.Code, second.Body)
+	}
+
+	var f, s struct {
+		ID       int64 `json:"id"`
+		Replayed bool  `json:"replayed"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &f); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &s); err != nil {
+		t.Fatal(err)
+	}
+	if f.Replayed {
+		t.Errorf("first response has replayed=true, want false")
+	}
+	if !s.Replayed {
+		t.Errorf("replay response has replayed=false, want true")
+	}
+	if f.ID != s.ID {
+		t.Errorf("replay returned id %d, want the original id %d", s.ID, f.ID)
+	}
+}
+
+func TestPostTransaction_ResponseHidesRequestHash(t *testing.T) {
+	r := testRouter(t)
+	a, b := newAPIAccount(t, r), newAPIAccount(t, r)
+
+	h := map[string]string{"Idempotency-Key": uniqueKey("hide")}
+	w := do(r, "POST", "/transactions", txBody(a, b, 100, -100), h)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("got %d, want 201: %s", w.Code, w.Body)
+	}
+	if strings.Contains(w.Body.String(), "request_hash") {
+		t.Errorf("response exposes request_hash: %s", w.Body)
 	}
 }

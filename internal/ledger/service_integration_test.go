@@ -168,7 +168,7 @@ func TestPostTransaction_KeyReuseWithDifferentPayload(t *testing.T) {
 	b := newAccount(t, q, "ETB")
 	key := uniqueKey("reuse")
 
-	post := func(amount int64) (db.Transaction, error) {
+	post := func(amount int64) (PostResult, error) {
 		return svc.PostTransaction(ctx, PostInput{
 			IdempotencyKey: key,
 			EffectiveDate:  time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC),

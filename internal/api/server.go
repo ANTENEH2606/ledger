@@ -87,6 +87,15 @@ type postTransactionRequest struct {
 	Description   string         `json:"description"`
 	Entries       []entryRequest `json:"entries" binding:"required,min=2,dive"`
 }
+type transactionResponse struct {
+	ID                    int64     `json:"id"`
+	IdempotencyKey        string    `json:"idempotency_key"`
+	EffectiveDate         string    `json:"effective_date"`
+	Description           string    `json:"description"`
+	ReversesTransactionID *int64    `json:"reverses_transaction_id"`
+	CreatedAt             time.Time `json:"created_at"`
+	Replayed              bool      `json:"replayed"`
+}
 
 func (s *Server) postTransaction(c *gin.Context) {
 	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
@@ -112,7 +121,7 @@ func (s *Server) postTransaction(c *gin.Context) {
 		entries[i] = ledger.EntryInput{AccountID: e.AccountID, Amount: e.Amount}
 	}
 
-	tx, err := s.svc.PostTransaction(c.Request.Context(), ledger.PostInput{
+	res, err := s.svc.PostTransaction(c.Request.Context(), ledger.PostInput{
 		IdempotencyKey: key,
 		EffectiveDate:  date,
 		Description:    req.Description,
@@ -124,7 +133,25 @@ func (s *Server) postTransaction(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, tx)
+	resp := transactionResponse{
+		ID:             res.ID,
+		IdempotencyKey: res.IdempotencyKey,
+		EffectiveDate:  res.EffectiveDate.Format("2006-01-02"),
+		Description:    res.Description,
+		CreatedAt:      res.CreatedAt,
+		Replayed:       res.Replayed,
+	}
+	if res.ReversesTransactionID.Valid {
+		id := res.ReversesTransactionID.Int64
+		resp.ReversesTransactionID = &id
+	}
+
+	status := http.StatusCreated
+	if res.Replayed {
+		status = http.StatusOK
+	}
+
+	c.JSON(status, resp)
 }
 
 func mapError(err error) (int, string) {
