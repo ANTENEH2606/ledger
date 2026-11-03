@@ -225,3 +225,69 @@ func TestBalance_AfterPosting(t *testing.T) {
 		t.Errorf("balance of a on 2026-10-26 = %d, want 0", got)
 	}
 }
+
+// newWalletID creates an asset account that forbids overdraft, through the API.
+func newWalletID(t *testing.T, r http.Handler) int64 {
+	t.Helper()
+
+	code := fmt.Sprintf("WAL%d", time.Now().UnixNano())
+	body := fmt.Sprintf(`{"code":%q,"name":"Wallet","type":"asset","currency":"ETB","allow_overdraft":false}`, code)
+
+	w := do(r, "POST", "/accounts", body, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create wallet: got %d, want 201: %s", w.Code, w.Body)
+	}
+	var acc struct {
+		ID             int64 `json:"id"`
+		AllowOverdraft bool  `json:"allow_overdraft"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &acc); err != nil {
+		t.Fatalf("decode wallet: %v", err)
+	}
+	if acc.AllowOverdraft {
+		t.Fatalf("wallet was created with allow_overdraft=true, want false")
+	}
+	return acc.ID
+}
+
+// Leaving allow_overdraft out must keep the old behaviour: overdraft allowed.
+func TestCreateAccount_OverdraftDefaultsToAllowed(t *testing.T) {
+	r := testRouter(t)
+
+	code := fmt.Sprintf("API%d", time.Now().UnixNano())
+	body := fmt.Sprintf(`{"code":%q,"name":"Default","type":"asset","currency":"ETB"}`, code)
+
+	w := do(r, "POST", "/accounts", body, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("got %d, want 201: %s", w.Code, w.Body)
+	}
+	var acc struct {
+		AllowOverdraft bool `json:"allow_overdraft"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &acc); err != nil {
+		t.Fatal(err)
+	}
+	if !acc.AllowOverdraft {
+		t.Errorf("allow_overdraft = false when the field was omitted, want true")
+	}
+}
+
+// A wallet created with allow_overdraft=false cannot be overdrawn through the API.
+func TestPostTransaction_NoOverdraftWallet(t *testing.T) {
+	r := testRouter(t)
+	wallet := newWalletID(t, r)
+	other := newAPIAccount(t, r)
+
+	// Deposit 100: debit the wallet, credit the other account. Allowed.
+	h := map[string]string{"Idempotency-Key": uniqueKey("dep")}
+	if w := do(r, "POST", "/transactions", txBody(wallet, other, 100, -100), h); w.Code != http.StatusCreated {
+		t.Fatalf("deposit: got %d, want 201: %s", w.Code, w.Body)
+	}
+
+	// Withdraw 150 (only 100 inside): credit the wallet. Must be refused.
+	h = map[string]string{"Idempotency-Key": uniqueKey("wd")}
+	w := do(r, "POST", "/transactions", txBody(other, wallet, 150, -150), h)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("overdraw: got %d, want 422: %s", w.Code, w.Body)
+	}
+}

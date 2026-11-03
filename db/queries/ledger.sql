@@ -4,8 +4,8 @@
 -- ============================================================
  
 -- name: CreateAccount :one
-INSERT INTO accounts (code, name, type, currency)
-VALUES ($1, $2, $3, $4)
+INSERT INTO accounts (code, name, type, currency, allow_overdraft)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
  
 -- name: GetAccount :one

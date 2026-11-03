@@ -14,16 +14,17 @@ import (
 
 const createAccount = `-- name: CreateAccount :one
  
-INSERT INTO accounts (code, name, type, currency)
-VALUES ($1, $2, $3, $4)
+INSERT INTO accounts (code, name, type, currency, allow_overdraft)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING id, code, name, type, currency, created_at, allow_overdraft
 `
 
 type CreateAccountParams struct {
-	Code     string `json:"code"`
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Currency string `json:"currency"`
+	Code           string `json:"code"`
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	Currency       string `json:"currency"`
+	AllowOverdraft bool   `json:"allow_overdraft"`
 }
 
 // ============================================================
@@ -35,6 +36,7 @@ func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (A
 		arg.Name,
 		arg.Type,
 		arg.Currency,
+		arg.AllowOverdraft,
 	)
 	var i Account
 	err := row.Scan(

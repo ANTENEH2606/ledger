@@ -43,10 +43,11 @@ func newAccount(t *testing.T, q *db.Queries, currency string) db.Account {
 
 	code := fmt.Sprintf("T%d", time.Now().UnixNano())
 	a, err := q.CreateAccount(context.Background(), db.CreateAccountParams{
-		Code:     code,
-		Name:     "test account " + code,
-		Type:     "asset",
-		Currency: currency,
+		Code:           code,
+		Name:           "test account " + code,
+		Type:           "asset",
+		Currency:       currency,
+		AllowOverdraft: true,
 	})
 	if err != nil {
 		t.Fatalf("create account: %v", err)

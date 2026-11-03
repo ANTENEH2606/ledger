@@ -38,10 +38,11 @@ func (s *Server) Routes() *gin.Engine {
 }
 
 type createAccountRequest struct {
-	Code     string `json:"code" binding:"required"`
-	Name     string `json:"name" binding:"required"`
-	Type     string `json:"type" binding:"required,oneof=asset liability equity revenue expense"`
-	Currency string `json:"currency" binding:"required,len=3"`
+	Code           string `json:"code" binding:"required"`
+	Name           string `json:"name" binding:"required"`
+	Type           string `json:"type" binding:"required,oneof=asset liability equity revenue expense"`
+	Currency       string `json:"currency" binding:"required,len=3"`
+	AllowOverdraft *bool  `json:"allow_overdraft"`
 }
 
 func (s *Server) createAccount(c *gin.Context) {
@@ -51,11 +52,17 @@ func (s *Server) createAccount(c *gin.Context) {
 		return
 	}
 
+	allow := true
+	if req.AllowOverdraft != nil {
+		allow = *req.AllowOverdraft
+	}
+
 	acc, err := s.q.CreateAccount(c.Request.Context(), db.CreateAccountParams{
-		Code:     req.Code,
-		Name:     req.Name,
-		Type:     req.Type,
-		Currency: req.Currency,
+		Code:           req.Code,
+		Name:           req.Name,
+		Type:           req.Type,
+		Currency:       req.Currency,
+		AllowOverdraft: allow,
 	})
 	if err != nil {
 		var pgErr *pgconn.PgError

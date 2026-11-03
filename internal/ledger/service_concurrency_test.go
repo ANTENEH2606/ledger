@@ -191,10 +191,11 @@ func newTypedAccount(t *testing.T, q *db.Queries, accountType, currency string) 
 
 	code := fmt.Sprintf("W%d", time.Now().UnixNano())
 	a, err := q.CreateAccount(context.Background(), db.CreateAccountParams{
-		Code:     code,
-		Name:     "test " + accountType + " " + code,
-		Type:     accountType,
-		Currency: currency,
+		Code:           code,
+		Name:           "test " + accountType + " " + code,
+		Type:           accountType,
+		Currency:       currency,
+		AllowOverdraft: true,
 	})
 	if err != nil {
 		t.Fatalf("create account: %v", err)
