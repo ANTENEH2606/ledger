@@ -74,3 +74,21 @@ func TestDB_RejectsUpdateAndDelete(t *testing.T) {
 		}
 	}
 }
+
+// TRUNCATE must be refused too. It runs in a transaction that is never committed,
+// so even if the protection were missing, no data would be lost.
+func TestDB_RejectsTruncate(t *testing.T) {
+	svc, _ := stressEnv(t)
+	ctx := context.Background()
+
+	tx, err := svc.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Both tables listed together, because transactions is referenced by a foreign key.
+	if _, err := tx.Exec(ctx, `TRUNCATE entries, transactions`); pgCode(err) != "P0001" {
+		t.Fatalf("truncate: got %v, want error code P0001", err)
+	}
+}
