@@ -20,6 +20,7 @@ var (
 
 	ErrInsufficientFunds   = errors.New("insufficient funds")
 	ErrIdempotencyKeyReuse = errors.New("idempotency key already used with a different request")
+	ErrBackdated           = errors.New("posting is dated before the newest entry on a no-overdraft account")
 )
 
 const maxAttempts = 3
@@ -112,7 +113,7 @@ func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error
 	// 3. Enforce "no overdraft" on accounts that forbid it. This reads
 	//    balances, which is exactly why the locks above matter: while we hold
 	//    them, nobody else can change these balances under us.
-	if err := checkFunds(ctx, q, accounts, in.Entries); err != nil {
+	if err := checkFunds(ctx, q, accounts, in.Entries, in.EffectiveDate); err != nil {
 		return db.Transaction{}, err
 	}
 
@@ -138,7 +139,7 @@ func (s *Service) post(ctx context.Context, in PostInput) (db.Transaction, error
 
 // checkFunds refuses the posting if it would push an account that forbids
 // overdraft onto the wrong side of zero. The accounts must already be locked.
-func checkFunds(ctx context.Context, q *db.Queries, accounts []db.LockAccountsForUpdateRow, entries []EntryInput) error {
+func checkFunds(ctx context.Context, q *db.Queries, accounts []db.LockAccountsForUpdateRow, entries []EntryInput, date time.Time) error {
 	delta := make(map[int64]int64)
 	for _, e := range entries {
 		delta[e.AccountID] += e.Amount
@@ -148,6 +149,18 @@ func checkFunds(ctx context.Context, q *db.Queries, accounts []db.LockAccountsFo
 		if a.AllowOverdraft {
 			continue
 		}
+		// Backdating would let a past date go negative even though "now" looks fine.
+		later, err := q.HasEntriesAfter(ctx, db.HasEntriesAfterParams{
+			AccountID: a.ID,
+			OnDate:    date,
+		})
+		if err != nil {
+			return fmt.Errorf("check dates of account %d: %w", a.ID, err)
+		}
+		if later {
+			return fmt.Errorf("%w: account %d", ErrBackdated, a.ID)
+		}
+
 		balance, err := q.GetAccountBalance(ctx, a.ID)
 		if err != nil {
 			return fmt.Errorf("balance of account %d: %w", a.ID, err)

@@ -102,3 +102,12 @@ LEFT JOIN (
 GROUP BY a.id, a.code, a.name, a.type, a.currency
 ORDER BY a.code;
  
+-- name: HasEntriesAfter :one
+-- True if the account already has an entry dated after @on_date.
+SELECT EXISTS (
+    SELECT 1
+    FROM entries e
+    JOIN transactions t ON t.id = e.transaction_id
+    WHERE e.account_id = @account_id
+      AND t.effective_date > @on_date::date
+) AS found;

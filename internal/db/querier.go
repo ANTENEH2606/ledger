@@ -37,6 +37,8 @@ type Querier interface {
 	// Debit and credit totals per account as of a date. Across all accounts
 	// (per currency) the total debits must equal the total credits.
 	GetTrialBalance(ctx context.Context, asOf time.Time) ([]GetTrialBalanceRow, error)
+	// True if the account already has an entry dated after @on_date.
+	HasEntriesAfter(ctx context.Context, arg HasEntriesAfterParams) (bool, error)
 	ListAccounts(ctx context.Context) ([]Account, error)
 	ListEntriesByTransaction(ctx context.Context, transactionID int64) ([]Entry, error)
 	// Locks the given accounts in a fixed order (by id) so that concurrent

@@ -210,3 +210,43 @@ func TestPostTransaction_KeyReuseWithDifferentPayload(t *testing.T) {
 		t.Errorf("retry returned transaction %d, want %d", again.ID, first.ID)
 	}
 }
+
+func TestPostTransaction_BackdatingRefusedOnNoOverdraftAccount(t *testing.T) {
+	svc, q := stressEnv(t)
+	ctx := context.Background()
+
+	wallet := newTypedAccount(t, q, "asset", "ETB")
+	other := newAccount(t, q, "ETB") // overdraft allowed
+	if err := q.SetAllowOverdraft(ctx, db.SetAllowOverdraftParams{ID: wallet.ID, AllowOverdraft: false}); err != nil {
+		t.Fatal(err)
+	}
+
+	day := func(d int) time.Time { return time.Date(2026, 10, d, 0, 0, 0, 0, time.UTC) }
+	post := func(key string, date time.Time, amount int64) error {
+		_, err := svc.PostTransaction(ctx, PostInput{
+			IdempotencyKey: uniqueKey(key),
+			EffectiveDate:  date,
+			Entries: []EntryInput{
+				{AccountID: wallet.ID, Amount: amount},
+				{AccountID: other.ID, Amount: -amount},
+			},
+		})
+		return err
+	}
+
+	// Deposit 100 on Oct 10.
+	if err := post("dep", day(10), 100); err != nil {
+		t.Fatalf("deposit: %v", err)
+	}
+	// Withdraw 80 dated Oct 1: today's balance would stay positive, but on Oct 1 it was -80.
+	if err := post("old", day(1), -80); !errors.Is(err, ErrBackdated) {
+		t.Fatalf("backdated withdrawal: got %v, want ErrBackdated", err)
+	}
+	// The same date is fine, and so is a later date.
+	if err := post("same", day(10), -30); err != nil {
+		t.Fatalf("same-day withdrawal: %v", err)
+	}
+	if err := post("later", day(11), -20); err != nil {
+		t.Fatalf("later withdrawal: %v", err)
+	}
+}

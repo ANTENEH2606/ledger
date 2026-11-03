@@ -133,7 +133,8 @@ func mapError(err error) (int, string) {
 		errors.Is(err, ledger.ErrZeroAmount),
 		errors.Is(err, ledger.ErrNoKey),
 		errors.Is(err, ledger.ErrUnbalanced),
-		errors.Is(err, ledger.ErrOverflow):
+		errors.Is(err, ledger.ErrOverflow),
+		errors.Is(err, ledger.ErrBackdated):
 		return http.StatusBadRequest, err.Error()
 
 	case errors.Is(err, ledger.ErrUnknownAccount),

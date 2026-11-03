@@ -339,6 +339,29 @@ func (q *Queries) GetTrialBalance(ctx context.Context, asOf time.Time) ([]GetTri
 	return items, nil
 }
 
+const hasEntriesAfter = `-- name: HasEntriesAfter :one
+SELECT EXISTS (
+    SELECT 1
+    FROM entries e
+    JOIN transactions t ON t.id = e.transaction_id
+    WHERE e.account_id = $1
+      AND t.effective_date > $2::date
+) AS found
+`
+
+type HasEntriesAfterParams struct {
+	AccountID int64     `json:"account_id"`
+	OnDate    time.Time `json:"on_date"`
+}
+
+// True if the account already has an entry dated after @on_date.
+func (q *Queries) HasEntriesAfter(ctx context.Context, arg HasEntriesAfterParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasEntriesAfter, arg.AccountID, arg.OnDate)
+	var found bool
+	err := row.Scan(&found)
+	return found, err
+}
+
 const listAccounts = `-- name: ListAccounts :many
 SELECT id, code, name, type, currency, created_at, allow_overdraft FROM accounts ORDER BY code
 `
