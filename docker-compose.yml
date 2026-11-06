@@ -39,6 +39,7 @@ services:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: postgres://ledger:${PG_PASSWORD}@db:5432/ledger?sslmode=disable
+      GIN_MODE: release
     ports:
       - "127.0.0.1:8080:8080"
 

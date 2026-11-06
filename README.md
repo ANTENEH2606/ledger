@@ -117,6 +117,7 @@ make run                # run the API on the host
 make test-db-create     # once: create the separate ledger_test database
 make test-db-migrate    # apply migrations to the test database
 make test-db            # run all tests against ledger_test
+make run                # run the API on the host (release mode; use GIN_MODE=debug make run for route logs)
 ```
 
 Tests run against a separate `ledger_test` database so they never touch real data. Database tests are skipped when `DATABASE_URL` is not set, so check for `PASS` and not `SKIP` when running them with `-v`.
@@ -154,7 +155,7 @@ ledger/
   sqlc.yaml                sqlc configuration
   .env.example             template for local configuration
   .gitignore               keeps .env and other private files out of Git
-  .dockerignore            keeps .env and .git out of the Docker image
+  .dockerignore            keeps .env, .git and build-irrelevant files out of the Docker image
   db/
     migrations/            schema, constraints, triggers
     queries/ledger.sql     SQL that sqlc turns into Go

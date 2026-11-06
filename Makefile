@@ -2,6 +2,8 @@
 DB_URL ?= $(shell grep '^DATABASE_URL=' .env | cut -d= -f2-)
 TEST_DB_URL ?= $(shell grep '^TEST_DATABASE_URL=' .env | cut -d= -f2-)
 
+export GIN_MODE ?= release
+
 .PHONY: run build tidy db-up migrate-up migrate-down migrate-new migrate-status psql test test-db test-db-migrate up down test-db-create
 
 run:
