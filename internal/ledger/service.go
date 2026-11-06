@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -129,7 +130,7 @@ func (s *Service) post(ctx context.Context, in PostInput) (PostResult, error) {
 		return PostResult{}, err
 	}
 
-	// 4. Insert the entries.
+	// 4a. Insert the entries.
 	for _, e := range in.Entries {
 		_, err := q.CreateEntry(ctx, db.CreateEntryParams{
 			TransactionID: t.ID,
@@ -139,6 +140,29 @@ func (s *Service) post(ctx context.Context, in PostInput) (PostResult, error) {
 		if err != nil {
 			return PostResult{}, fmt.Errorf("create entry: %w", err)
 		}
+	}
+
+	// 4b. Record the event in the SAME database transaction. If anything fails
+	//     (or the commit is rejected), the event disappears together with the posting.
+	ev := postedEvent{
+		TransactionID: t.ID,
+		EffectiveDate: in.EffectiveDate.Format("2006-01-02"),
+		Description:   in.Description,
+	}
+	for _, e := range in.Entries {
+		ev.Entries = append(ev.Entries, postedEntry{AccountID: e.AccountID, Amount: e.Amount})
+	}
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return PostResult{}, fmt.Errorf("marshal event: %w", err)
+	}
+	if _, err := q.CreateOutboxEvent(ctx, db.CreateOutboxEventParams{
+		AggregateType: "transaction",
+		AggregateID:   t.ID,
+		EventType:     "transaction.posted",
+		Payload:       payload,
+	}); err != nil {
+		return PostResult{}, fmt.Errorf("create outbox event: %w", err)
 	}
 
 	// 5. Commit. The deferred balance trigger runs here and rejects the
@@ -219,4 +243,16 @@ func isRetryable(err error) bool {
 		return pgErr.Code == "40P01" || pgErr.Code == "40001"
 	}
 	return false
+}
+
+type postedEntry struct {
+	AccountID int64 `json:"account_id"`
+	Amount    int64 `json:"amount"`
+}
+
+type postedEvent struct {
+	TransactionID int64         `json:"transaction_id"`
+	EffectiveDate string        `json:"effective_date"`
+	Description   string        `json:"description"`
+	Entries       []postedEntry `json:"entries"`
 }

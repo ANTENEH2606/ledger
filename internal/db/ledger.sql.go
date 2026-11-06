@@ -76,6 +76,41 @@ func (q *Queries) CreateEntry(ctx context.Context, arg CreateEntryParams) (Entry
 	return i, err
 }
 
+const createOutboxEvent = `-- name: CreateOutboxEvent :one
+INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload)
+VALUES ($1, $2, $3, $4)
+RETURNING id, aggregate_type, aggregate_id, event_type, payload, created_at, published_at, attempts, last_error
+`
+
+type CreateOutboxEventParams struct {
+	AggregateType string `json:"aggregate_type"`
+	AggregateID   int64  `json:"aggregate_id"`
+	EventType     string `json:"event_type"`
+	Payload       []byte `json:"payload"`
+}
+
+func (q *Queries) CreateOutboxEvent(ctx context.Context, arg CreateOutboxEventParams) (OutboxEvent, error) {
+	row := q.db.QueryRow(ctx, createOutboxEvent,
+		arg.AggregateType,
+		arg.AggregateID,
+		arg.EventType,
+		arg.Payload,
+	)
+	var i OutboxEvent
+	err := row.Scan(
+		&i.ID,
+		&i.AggregateType,
+		&i.AggregateID,
+		&i.EventType,
+		&i.Payload,
+		&i.CreatedAt,
+		&i.PublishedAt,
+		&i.Attempts,
+		&i.LastError,
+	)
+	return i, err
+}
+
 const createTransaction = `-- name: CreateTransaction :one
 INSERT INTO transactions (idempotency_key, effective_date, description, reverses_transaction_id,request_hash)
 VALUES ($1, $2, $3, $4, $5)
@@ -482,6 +517,47 @@ func (q *Queries) ListEntriesByTransaction(ctx context.Context, transactionID in
 			&i.AccountID,
 			&i.Amount,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOutboxEventsByAggregate = `-- name: ListOutboxEventsByAggregate :many
+SELECT id, aggregate_type, aggregate_id, event_type, payload, created_at, published_at, attempts, last_error FROM outbox_events
+WHERE aggregate_type = $1 AND aggregate_id = $2
+ORDER BY id
+`
+
+type ListOutboxEventsByAggregateParams struct {
+	AggregateType string `json:"aggregate_type"`
+	AggregateID   int64  `json:"aggregate_id"`
+}
+
+func (q *Queries) ListOutboxEventsByAggregate(ctx context.Context, arg ListOutboxEventsByAggregateParams) ([]OutboxEvent, error) {
+	rows, err := q.db.Query(ctx, listOutboxEventsByAggregate, arg.AggregateType, arg.AggregateID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OutboxEvent
+	for rows.Next() {
+		var i OutboxEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.AggregateType,
+			&i.AggregateID,
+			&i.EventType,
+			&i.Payload,
+			&i.CreatedAt,
+			&i.PublishedAt,
+			&i.Attempts,
+			&i.LastError,
 		); err != nil {
 			return nil, err
 		}

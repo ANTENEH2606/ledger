@@ -132,3 +132,12 @@ SELECT EXISTS (
       AND t.effective_date > @on_date::date
 ) AS found;
 
+-- name: CreateOutboxEvent :one
+INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload)
+VALUES ($1, $2, $3, $4)
+RETURNING *;
+
+-- name: ListOutboxEventsByAggregate :many
+SELECT * FROM outbox_events
+WHERE aggregate_type = $1 AND aggregate_id = $2
+ORDER BY id;

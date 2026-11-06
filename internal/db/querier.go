@@ -15,6 +15,7 @@ type Querier interface {
 	// ============================================================
 	CreateAccount(ctx context.Context, arg CreateAccountParams) (Account, error)
 	CreateEntry(ctx context.Context, arg CreateEntryParams) (Entry, error)
+	CreateOutboxEvent(ctx context.Context, arg CreateOutboxEventParams) (OutboxEvent, error)
 	// ON CONFLICT DO NOTHING returns no row when the key already exists
 	// (a retried request); the caller then loads the original transaction.
 	CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error)
@@ -44,6 +45,7 @@ type Querier interface {
 	HasEntriesAfter(ctx context.Context, arg HasEntriesAfterParams) (bool, error)
 	ListAccounts(ctx context.Context) ([]Account, error)
 	ListEntriesByTransaction(ctx context.Context, transactionID int64) ([]Entry, error)
+	ListOutboxEventsByAggregate(ctx context.Context, arg ListOutboxEventsByAggregateParams) ([]OutboxEvent, error)
 	// Locks the given accounts in a fixed order (by id) so that concurrent
 	// transfers cannot deadlock. Call inside the posting transaction.
 	LockAccountsForUpdate(ctx context.Context, ids []int64) ([]LockAccountsForUpdateRow, error)

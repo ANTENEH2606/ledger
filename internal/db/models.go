@@ -28,6 +28,18 @@ type Entry struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+type OutboxEvent struct {
+	ID            int64              `json:"id"`
+	AggregateType string             `json:"aggregate_type"`
+	AggregateID   int64              `json:"aggregate_id"`
+	EventType     string             `json:"event_type"`
+	Payload       []byte             `json:"payload"`
+	CreatedAt     time.Time          `json:"created_at"`
+	PublishedAt   pgtype.Timestamptz `json:"published_at"`
+	Attempts      int32              `json:"attempts"`
+	LastError     pgtype.Text        `json:"last_error"`
+}
+
 type Transaction struct {
 	ID                    int64       `json:"id"`
 	IdempotencyKey        string      `json:"idempotency_key"`
