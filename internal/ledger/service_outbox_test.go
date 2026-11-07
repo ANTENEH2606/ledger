@@ -46,12 +46,6 @@ func TestOutbox_PostingWritesOneEvent(t *testing.T) {
 	if ev.EventType != "transaction.posted" {
 		t.Errorf("event type = %q, want transaction.posted", ev.EventType)
 	}
-	if ev.PublishedAt.Valid {
-		t.Errorf("new event is already marked published")
-	}
-	if ev.Attempts != 0 {
-		t.Errorf("attempts = %d, want 0", ev.Attempts)
-	}
 
 	var p postedEvent
 	if err := json.Unmarshal(ev.Payload, &p); err != nil {

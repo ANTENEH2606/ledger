@@ -12,6 +12,45 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimOutboxBatch = `-- name: ClaimOutboxBatch :many
+SELECT id, aggregate_type, aggregate_id, event_type, payload, created_at, published_at, attempts, last_error FROM outbox_events
+WHERE published_at IS NULL
+ORDER BY id
+LIMIT $1::int
+FOR UPDATE SKIP LOCKED
+`
+
+// Unsent events, oldest first. Rows locked by another worker are skipped.
+func (q *Queries) ClaimOutboxBatch(ctx context.Context, batchSize int32) ([]OutboxEvent, error) {
+	rows, err := q.db.Query(ctx, claimOutboxBatch, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OutboxEvent
+	for rows.Next() {
+		var i OutboxEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.AggregateType,
+			&i.AggregateID,
+			&i.EventType,
+			&i.Payload,
+			&i.CreatedAt,
+			&i.PublishedAt,
+			&i.Attempts,
+			&i.LastError,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createAccount = `-- name: CreateAccount :one
  
 INSERT INTO accounts (code, name, type, currency, allow_overdraft)
@@ -608,6 +647,33 @@ func (q *Queries) LockAccountsForUpdate(ctx context.Context, ids []int64) ([]Loc
 		return nil, err
 	}
 	return items, nil
+}
+
+const markOutboxFailed = `-- name: MarkOutboxFailed :exec
+UPDATE outbox_events
+SET attempts = attempts + 1, last_error = $2
+WHERE id = $1
+`
+
+type MarkOutboxFailedParams struct {
+	ID        int64       `json:"id"`
+	LastError pgtype.Text `json:"last_error"`
+}
+
+func (q *Queries) MarkOutboxFailed(ctx context.Context, arg MarkOutboxFailedParams) error {
+	_, err := q.db.Exec(ctx, markOutboxFailed, arg.ID, arg.LastError)
+	return err
+}
+
+const markOutboxPublished = `-- name: MarkOutboxPublished :exec
+UPDATE outbox_events
+SET published_at = now(), attempts = attempts + 1, last_error = NULL
+WHERE id = $1
+`
+
+func (q *Queries) MarkOutboxPublished(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, markOutboxPublished, id)
+	return err
 }
 
 const setAllowOverdraft = `-- name: SetAllowOverdraft :exec

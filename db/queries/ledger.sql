@@ -141,3 +141,21 @@ RETURNING *;
 SELECT * FROM outbox_events
 WHERE aggregate_type = $1 AND aggregate_id = $2
 ORDER BY id;
+
+-- name: ClaimOutboxBatch :many
+-- Unsent events, oldest first. Rows locked by another worker are skipped.
+SELECT * FROM outbox_events
+WHERE published_at IS NULL
+ORDER BY id
+LIMIT @batch_size::int
+FOR UPDATE SKIP LOCKED;
+
+-- name: MarkOutboxPublished :exec
+UPDATE outbox_events
+SET published_at = now(), attempts = attempts + 1, last_error = NULL
+WHERE id = $1;
+
+-- name: MarkOutboxFailed :exec
+UPDATE outbox_events
+SET attempts = attempts + 1, last_error = $2
+WHERE id = $1;

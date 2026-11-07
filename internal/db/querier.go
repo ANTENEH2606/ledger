@@ -10,6 +10,8 @@ import (
 )
 
 type Querier interface {
+	// Unsent events, oldest first. Rows locked by another worker are skipped.
+	ClaimOutboxBatch(ctx context.Context, batchSize int32) ([]OutboxEvent, error)
 	// ============================================================
 	// Accounts
 	// ============================================================
@@ -49,6 +51,8 @@ type Querier interface {
 	// Locks the given accounts in a fixed order (by id) so that concurrent
 	// transfers cannot deadlock. Call inside the posting transaction.
 	LockAccountsForUpdate(ctx context.Context, ids []int64) ([]LockAccountsForUpdateRow, error)
+	MarkOutboxFailed(ctx context.Context, arg MarkOutboxFailedParams) error
+	MarkOutboxPublished(ctx context.Context, id int64) error
 	SetAllowOverdraft(ctx context.Context, arg SetAllowOverdraftParams) error
 }
 
