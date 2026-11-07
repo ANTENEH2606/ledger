@@ -15,6 +15,7 @@ import (
 	"ledger/internal/api"
 	"ledger/internal/db"
 	"ledger/internal/ledger"
+	"ledger/internal/outbox"
 )
 
 func main() {
@@ -37,6 +38,18 @@ func run() error {
 	defer pool.Close()
 
 	srv := api.NewServer(db.New(pool), ledger.NewService(pool))
+
+	// Background worker: publishes outbox events. It stops before the pool closes.
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		outbox.NewWorker(pool, outbox.LogPublisher{}, 50).Run(workerCtx, 2*time.Second)
+	}()
+	defer func() {
+		stopWorker()
+		<-workerDone
+	}()
 
 	httpSrv := &http.Server{
 		Addr:              ":8080",

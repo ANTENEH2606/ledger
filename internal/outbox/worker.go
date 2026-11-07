@@ -83,7 +83,9 @@ func (w *Worker) Run(ctx context.Context, interval time.Duration) {
 		for ctx.Err() == nil {
 			n, err := w.RunOnce(ctx)
 			if err != nil {
-				log.Printf("outbox: %v", err)
+				if ctx.Err() == nil { // a cancelled context is a normal shutdown, not an error
+					log.Printf("outbox: %v", err)
+				}
 				break
 			}
 			if n == 0 {
