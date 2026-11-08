@@ -18,10 +18,11 @@ type EntryInput struct {
 }
 
 type PostInput struct {
-	IdempotencyKey string
-	EffectiveDate  time.Time
-	Description    string
-	Entries        []EntryInput
+	IdempotencyKey        string
+	EffectiveDate         time.Time
+	Description           string
+	Entries               []EntryInput
+	ReversesTransactionID int64 // ReversesTransactionID is set only for reversals: the transaction being reversed. Zero means none.
 }
 
 var (
@@ -90,6 +91,12 @@ func requestHash(in PostInput) string {
 	for _, e := range entries {
 		fmt.Fprintf(&b, "|%d:%d", e.AccountID, e.Amount) // the | and : separators keep account 1, amount 25 apart from account 12, amount 5
 	}
+
+	// Only for reversals. Normal postings produce exactly the same hash as before.
+	if in.ReversesTransactionID != 0 {
+		fmt.Fprintf(&b, "|rev:%d", in.ReversesTransactionID)
+	}
+
 	text := b.String()
 	sum := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(sum[:])

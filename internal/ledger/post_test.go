@@ -181,3 +181,37 @@ func TestRequestHash(t *testing.T) {
 		t.Errorf("requestHash reordered the caller's entries")
 	}
 }
+
+func TestRequestHash_Reversal(t *testing.T) {
+	base := PostInput{
+		IdempotencyKey: "k",
+		EffectiveDate:  time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC),
+		Entries: []EntryInput{
+			{AccountID: 1, Amount: 100},
+			{AccountID: 2, Amount: -100},
+		},
+	}
+
+	// A normal posting's hash must never change: stored hashes depend on it.
+	const want = "a662cfd9b5d8373f713215e7c5c84ba9bcf42b424edf24e2914d3ff62b97c4dd"
+	if got := requestHash(base); got != want {
+		t.Errorf("normal hash changed: got %s, want %s", got, want)
+	}
+
+	rev := base
+	rev.ReversesTransactionID = 42
+	if requestHash(rev) == requestHash(base) {
+		t.Error("a reversal must not hash the same as a normal posting")
+	}
+
+	const wantRev = "7d37e3610521a67dce9b13b30ce57e144cf418be3cd431e95f155fe46cc42ed4"
+	if got := requestHash(rev); got != wantRev {
+		t.Errorf("reversal hash: got %s, want %s", got, wantRev)
+	}
+
+	other := base
+	other.ReversesTransactionID = 43
+	if requestHash(other) == requestHash(rev) {
+		t.Error("reversing different transactions must give different hashes")
+	}
+}

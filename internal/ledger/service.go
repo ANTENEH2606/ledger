@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ledger/internal/db"
@@ -19,9 +21,12 @@ var (
 	ErrUnknownAccount = errors.New("one or more accounts do not exist")
 	ErrMixedCurrency  = errors.New("all accounts in a transaction must share one currency")
 
-	ErrInsufficientFunds   = errors.New("insufficient funds")
-	ErrIdempotencyKeyReuse = errors.New("idempotency key already used with a different request")
-	ErrBackdated           = errors.New("posting is dated before the newest entry on a no-overdraft account")
+	ErrInsufficientFunds     = errors.New("insufficient funds")
+	ErrIdempotencyKeyReuse   = errors.New("idempotency key already used with a different request")
+	ErrBackdated             = errors.New("posting is dated before the newest entry on a no-overdraft account")
+	ErrTransactionNotFound   = errors.New("transaction not found")
+	ErrAlreadyReversed       = errors.New("transaction has already been reversed")
+	ErrCannotReverseReversal = errors.New("a reversal cannot be reversed; post a new transaction instead")
 )
 
 const maxAttempts = 3
@@ -104,10 +109,11 @@ func (s *Service) post(ctx context.Context, in PostInput) (PostResult, error) {
 	// 2. Insert the transaction header. If the idempotency key already
 	//    exists, ON CONFLICT DO NOTHING returns no row: this is a retry.
 	t, err := q.CreateTransaction(ctx, db.CreateTransactionParams{
-		IdempotencyKey: in.IdempotencyKey,
-		EffectiveDate:  in.EffectiveDate,
-		Description:    in.Description,
-		RequestHash:    hash,
+		IdempotencyKey:        in.IdempotencyKey,
+		EffectiveDate:         in.EffectiveDate,
+		Description:           in.Description,
+		ReversesTransactionID: pgtype.Int8{Int64: in.ReversesTransactionID, Valid: in.ReversesTransactionID != 0},
+		RequestHash:           hash,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, getErr := q.GetTransactionByIdempotencyKey(ctx, in.IdempotencyKey)
@@ -120,6 +126,11 @@ func (s *Service) post(ctx context.Context, in PostInput) (PostResult, error) {
 		return PostResult{Transaction: existing, Replayed: true}, nil
 	}
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+			pgErr.ConstraintName == "transactions_reverses_transaction_id_key" {
+			return PostResult{}, ErrAlreadyReversed
+		}
 		return PostResult{}, fmt.Errorf("create transaction: %w", err)
 	}
 
@@ -145,9 +156,10 @@ func (s *Service) post(ctx context.Context, in PostInput) (PostResult, error) {
 	// 4b. Record the event in the SAME database transaction. If anything fails
 	//     (or the commit is rejected), the event disappears together with the posting.
 	ev := postedEvent{
-		TransactionID: t.ID,
-		EffectiveDate: in.EffectiveDate.Format("2006-01-02"),
-		Description:   in.Description,
+		TransactionID:         t.ID,
+		ReversesTransactionID: in.ReversesTransactionID, // new: zero for normal postings
+		EffectiveDate:         in.EffectiveDate.Format("2006-01-02"),
+		Description:           in.Description,
 	}
 	for _, e := range in.Entries {
 		ev.Entries = append(ev.Entries, postedEntry{AccountID: e.AccountID, Amount: e.Amount})
@@ -251,8 +263,58 @@ type postedEntry struct {
 }
 
 type postedEvent struct {
-	TransactionID int64         `json:"transaction_id"`
-	EffectiveDate string        `json:"effective_date"`
-	Description   string        `json:"description"`
-	Entries       []postedEntry `json:"entries"`
+	TransactionID         int64         `json:"transaction_id"`
+	ReversesTransactionID int64         `json:"reverses_transaction_id,omitempty"`
+	EffectiveDate         string        `json:"effective_date"`
+	Description           string        `json:"description"`
+	Entries               []postedEntry `json:"entries"`
+}
+
+type ReverseInput struct {
+	IdempotencyKey string
+	EffectiveDate  time.Time
+	Description    string // optional
+}
+
+// ReverseTransaction posts a new transaction that exactly undoes an earlier one.
+// Posted rows never change, so reading the original outside the posting transaction is safe.
+func (s *Service) ReverseTransaction(ctx context.Context, originalID int64, in ReverseInput) (PostResult, error) {
+	q := db.New(s.pool)
+
+	orig, err := q.GetTransaction(ctx, originalID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PostResult{}, ErrTransactionNotFound
+	}
+	if err != nil {
+		return PostResult{}, fmt.Errorf("load transaction: %w", err)
+	}
+	if orig.ReversesTransactionID.Valid {
+		return PostResult{}, ErrCannotReverseReversal
+	}
+
+	entries, err := q.ListEntriesByTransaction(ctx, originalID)
+	if err != nil {
+		return PostResult{}, fmt.Errorf("load entries: %w", err)
+	}
+
+	flipped := make([]EntryInput, len(entries))
+	for i, e := range entries {
+		if e.Amount == math.MinInt64 { // -MinInt64 does not fit in an int64
+			return PostResult{}, ErrOverflow
+		}
+		flipped[i] = EntryInput{AccountID: e.AccountID, Amount: -e.Amount}
+	}
+
+	desc := in.Description
+	if desc == "" {
+		desc = fmt.Sprintf("Reversal of transaction %d", originalID)
+	}
+
+	return s.PostTransaction(ctx, PostInput{
+		IdempotencyKey:        in.IdempotencyKey,
+		EffectiveDate:         in.EffectiveDate,
+		Description:           desc,
+		Entries:               flipped,
+		ReversesTransactionID: originalID,
+	})
 }
