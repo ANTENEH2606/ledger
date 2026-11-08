@@ -27,13 +27,14 @@ func (LogPublisher) Publish(_ context.Context, ev db.OutboxEvent) error {
 }
 
 type Worker struct {
-	pool  *pgxpool.Pool
-	pub   Publisher
-	batch int
+	pool        *pgxpool.Pool
+	pub         Publisher
+	batch       int
+	maxAttempts int
 }
 
 func NewWorker(pool *pgxpool.Pool, pub Publisher, batch int) *Worker {
-	return &Worker{pool: pool, pub: pub, batch: batch}
+	return &Worker{pool: pool, pub: pub, batch: batch, maxAttempts: DefaultMaxAttempts}
 }
 
 // RunOnce handles one batch and returns how many events were published.
@@ -55,10 +56,15 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	for _, ev := range events {
 		if err := w.pub.Publish(ctx, ev); err != nil {
 			if mErr := q.MarkOutboxFailed(ctx, db.MarkOutboxFailedParams{
-				ID:        ev.ID,
-				LastError: pgtype.Text{String: err.Error(), Valid: true},
+				ID:                ev.ID,
+				LastError:         pgtype.Text{String: err.Error(), Valid: true},
+				RetryAfterSeconds: int32(Backoff(ev.Attempts).Seconds()),
+				MaxAttempts:       int32(w.maxAttempts),
 			}); mErr != nil {
 				return 0, fmt.Errorf("mark failed: %w", mErr)
+			}
+			if int(ev.Attempts)+1 >= w.maxAttempts {
+				log.Printf("outbox event %d: giving up after %d attempts: %v", ev.ID, ev.Attempts+1, err)
 			}
 			continue
 		}
@@ -98,4 +104,24 @@ func (w *Worker) Run(ctx context.Context, interval time.Duration) {
 		case <-t.C:
 		}
 	}
+}
+
+const DefaultMaxAttempts = 8
+
+// Backoff is the delay before the next try. attempts is how many tries have already failed:
+// 5s, 10s, 20s, ... capped at 10 minutes.
+func Backoff(attempts int32) time.Duration {
+	if attempts > 7 {
+		attempts = 7
+	}
+	d := 5 * time.Second << attempts
+	if d > 10*time.Minute {
+		d = 10 * time.Minute
+	}
+	return d
+}
+
+func (w *Worker) WithMaxAttempts(n int) *Worker {
+	w.maxAttempts = n
+	return w
 }

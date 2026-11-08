@@ -168,6 +168,11 @@ func TestWorker_FailureIsRecordedAndRetried(t *testing.T) {
 		t.Errorf("failure not recorded: attempts=%d last_error=%+v", after.Attempts, after.LastError)
 	}
 
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE outbox_events SET next_attempt_at = now() WHERE id = $1`, ev.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	drain(t, good) // the retry succeeds
 	after = reload(t, pool, ev)
 	if !after.PublishedAt.Valid || after.Attempts != 2 || after.LastError.Valid {
@@ -196,5 +201,54 @@ func TestWorker_ConcurrentWorkersNeverDoublePublish(t *testing.T) {
 		if got := rec.count(ev.ID); got != 1 {
 			t.Errorf("event %d published %d times, want exactly 1", ev.ID, got)
 		}
+	}
+}
+
+func TestWorker_BacksOffThenGivesUp(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	drain(t, NewWorker(pool, newRecorder(0), 1000)) // clear leftovers
+
+	ev := postN(t, pool, 1)[0]
+	bad := NewWorker(pool, failing{}, 1000).WithMaxAttempts(2)
+	makeDue := func() {
+		if _, err := pool.Exec(ctx, `UPDATE outbox_events SET next_attempt_at = now() WHERE id = $1`, ev.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// First failure: delayed into the future, not given up.
+	if _, err := bad.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a := reload(t, pool, ev)
+	if a.Attempts != 1 || a.FailedAt.Valid || !a.NextAttemptAt.After(time.Now()) {
+		t.Fatalf("after 1st failure: attempts=%d failed=%v next=%v", a.Attempts, a.FailedAt.Valid, a.NextAttemptAt)
+	}
+
+	// Not due yet, so an immediate run must leave it alone.
+	if _, err := bad.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a = reload(t, pool, ev); a.Attempts != 1 {
+		t.Fatalf("an event that is not due was tried again: attempts=%d", a.Attempts)
+	}
+
+	// Second failure reaches the limit: given up.
+	makeDue()
+	if _, err := bad.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a = reload(t, pool, ev); a.Attempts != 2 || !a.FailedAt.Valid {
+		t.Fatalf("after 2nd failure: attempts=%d failed=%v, want 2 and failed", a.Attempts, a.FailedAt.Valid)
+	}
+
+	// A given-up event is never claimed again.
+	makeDue()
+	if _, err := bad.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a = reload(t, pool, ev); a.Attempts != 2 {
+		t.Fatalf("a given-up event was tried again: attempts=%d", a.Attempts)
 	}
 }

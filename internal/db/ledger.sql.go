@@ -13,14 +13,16 @@ import (
 )
 
 const claimOutboxBatch = `-- name: ClaimOutboxBatch :many
-SELECT id, aggregate_type, aggregate_id, event_type, payload, created_at, published_at, attempts, last_error FROM outbox_events
+SELECT id, aggregate_type, aggregate_id, event_type, payload, created_at, published_at, attempts, last_error, next_attempt_at, failed_at FROM outbox_events
 WHERE published_at IS NULL
+  AND failed_at IS NULL
+  AND next_attempt_at <= now()
 ORDER BY id
 LIMIT $1::int
 FOR UPDATE SKIP LOCKED
 `
 
-// Unsent events, oldest first. Rows locked by another worker are skipped.
+// Unsent events that are due, oldest first. Rows locked by another worker are skipped.
 func (q *Queries) ClaimOutboxBatch(ctx context.Context, batchSize int32) ([]OutboxEvent, error) {
 	rows, err := q.db.Query(ctx, claimOutboxBatch, batchSize)
 	if err != nil {
@@ -40,6 +42,8 @@ func (q *Queries) ClaimOutboxBatch(ctx context.Context, batchSize int32) ([]Outb
 			&i.PublishedAt,
 			&i.Attempts,
 			&i.LastError,
+			&i.NextAttemptAt,
+			&i.FailedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -118,7 +122,7 @@ func (q *Queries) CreateEntry(ctx context.Context, arg CreateEntryParams) (Entry
 const createOutboxEvent = `-- name: CreateOutboxEvent :one
 INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload)
 VALUES ($1, $2, $3, $4)
-RETURNING id, aggregate_type, aggregate_id, event_type, payload, created_at, published_at, attempts, last_error
+RETURNING id, aggregate_type, aggregate_id, event_type, payload, created_at, published_at, attempts, last_error, next_attempt_at, failed_at
 `
 
 type CreateOutboxEventParams struct {
@@ -146,6 +150,8 @@ func (q *Queries) CreateOutboxEvent(ctx context.Context, arg CreateOutboxEventPa
 		&i.PublishedAt,
 		&i.Attempts,
 		&i.LastError,
+		&i.NextAttemptAt,
+		&i.FailedAt,
 	)
 	return i, err
 }
@@ -568,7 +574,7 @@ func (q *Queries) ListEntriesByTransaction(ctx context.Context, transactionID in
 }
 
 const listOutboxEventsByAggregate = `-- name: ListOutboxEventsByAggregate :many
-SELECT id, aggregate_type, aggregate_id, event_type, payload, created_at, published_at, attempts, last_error FROM outbox_events
+SELECT id, aggregate_type, aggregate_id, event_type, payload, created_at, published_at, attempts, last_error, next_attempt_at, failed_at FROM outbox_events
 WHERE aggregate_type = $1 AND aggregate_id = $2
 ORDER BY id
 `
@@ -597,6 +603,8 @@ func (q *Queries) ListOutboxEventsByAggregate(ctx context.Context, arg ListOutbo
 			&i.PublishedAt,
 			&i.Attempts,
 			&i.LastError,
+			&i.NextAttemptAt,
+			&i.FailedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -651,17 +659,28 @@ func (q *Queries) LockAccountsForUpdate(ctx context.Context, ids []int64) ([]Loc
 
 const markOutboxFailed = `-- name: MarkOutboxFailed :exec
 UPDATE outbox_events
-SET attempts = attempts + 1, last_error = $2
-WHERE id = $1
+SET attempts        = attempts + 1,
+    last_error      = $1,
+    next_attempt_at = now() + make_interval(secs => $2::int),
+    failed_at       = CASE WHEN attempts + 1 >= $3::int THEN now() ELSE failed_at END
+WHERE id = $4
 `
 
 type MarkOutboxFailedParams struct {
-	ID        int64       `json:"id"`
-	LastError pgtype.Text `json:"last_error"`
+	LastError         pgtype.Text `json:"last_error"`
+	RetryAfterSeconds int32       `json:"retry_after_seconds"`
+	MaxAttempts       int32       `json:"max_attempts"`
+	ID                int64       `json:"id"`
 }
 
+// Count the failure, schedule the retry, and give up after max_attempts.
 func (q *Queries) MarkOutboxFailed(ctx context.Context, arg MarkOutboxFailedParams) error {
-	_, err := q.db.Exec(ctx, markOutboxFailed, arg.ID, arg.LastError)
+	_, err := q.db.Exec(ctx, markOutboxFailed,
+		arg.LastError,
+		arg.RetryAfterSeconds,
+		arg.MaxAttempts,
+		arg.ID,
+	)
 	return err
 }
 

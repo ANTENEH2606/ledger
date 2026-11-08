@@ -38,6 +38,8 @@ type OutboxEvent struct {
 	PublishedAt   pgtype.Timestamptz `json:"published_at"`
 	Attempts      int32              `json:"attempts"`
 	LastError     pgtype.Text        `json:"last_error"`
+	NextAttemptAt time.Time          `json:"next_attempt_at"`
+	FailedAt      pgtype.Timestamptz `json:"failed_at"`
 }
 
 type Transaction struct {

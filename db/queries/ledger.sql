@@ -143,9 +143,11 @@ WHERE aggregate_type = $1 AND aggregate_id = $2
 ORDER BY id;
 
 -- name: ClaimOutboxBatch :many
--- Unsent events, oldest first. Rows locked by another worker are skipped.
+-- Unsent events that are due, oldest first. Rows locked by another worker are skipped.
 SELECT * FROM outbox_events
 WHERE published_at IS NULL
+  AND failed_at IS NULL
+  AND next_attempt_at <= now()
 ORDER BY id
 LIMIT @batch_size::int
 FOR UPDATE SKIP LOCKED;
@@ -156,6 +158,11 @@ SET published_at = now(), attempts = attempts + 1, last_error = NULL
 WHERE id = $1;
 
 -- name: MarkOutboxFailed :exec
+-- Count the failure, schedule the retry, and give up after max_attempts.
 UPDATE outbox_events
-SET attempts = attempts + 1, last_error = $2
-WHERE id = $1;
+SET attempts        = attempts + 1,
+    last_error      = @last_error,
+    next_attempt_at = now() + make_interval(secs => @retry_after_seconds::int),
+    failed_at       = CASE WHEN attempts + 1 >= @max_attempts::int THEN now() ELSE failed_at END
+WHERE id = @id;
+
