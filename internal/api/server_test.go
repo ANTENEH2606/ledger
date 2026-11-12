@@ -419,3 +419,170 @@ func TestStatement_BadPagingParams(t *testing.T) {
 		}
 	}
 }
+
+// postTx posts a 100 ETB transfer from a to b and returns the new transaction id.
+func postTx(t *testing.T, r http.Handler, a, b int64) int64 {
+	t.Helper()
+
+	h := map[string]string{"Idempotency-Key": uniqueKey("orig")}
+	w := do(r, "POST", "/transactions", txBody(a, b, 100, -100), h)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("post: got %d, want 201: %s", w.Code, w.Body)
+	}
+	var tx struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &tx); err != nil {
+		t.Fatalf("decode transaction: %v", err)
+	}
+	return tx.ID
+}
+
+const reverseBody = `{"effective_date":"2026-10-27"}`
+
+func reversePath(id int64) string {
+	return fmt.Sprintf("/transactions/%d/reverse", id)
+}
+
+func TestReverseAPI_NetsToZero(t *testing.T) {
+	r := testRouter(t)
+	a, b := newAPIAccount(t, r), newAPIAccount(t, r)
+	orig := postTx(t, r, a, b)
+
+	h := map[string]string{"Idempotency-Key": uniqueKey("rev")}
+	w := do(r, "POST", reversePath(orig), reverseBody, h)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("reverse: got %d, want 201: %s", w.Code, w.Body)
+	}
+
+	var rev struct {
+		ID                    int64  `json:"id"`
+		ReversesTransactionID *int64 `json:"reverses_transaction_id"`
+		Replayed              bool   `json:"replayed"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rev); err != nil {
+		t.Fatal(err)
+	}
+	if rev.ReversesTransactionID == nil || *rev.ReversesTransactionID != orig {
+		t.Errorf("reverses_transaction_id = %v, want %d", rev.ReversesTransactionID, orig)
+	}
+	if rev.Replayed {
+		t.Errorf("first reversal has replayed=true, want false")
+	}
+
+	if got := balanceOf(t, r, a, "2026-10-27"); got != 0 {
+		t.Errorf("balance of a = %d, want 0", got)
+	}
+	if got := balanceOf(t, r, b, "2026-10-27"); got != 0 {
+		t.Errorf("balance of b = %d, want 0", got)
+	}
+}
+
+func TestReverseAPI_OnlyOnce(t *testing.T) {
+	r := testRouter(t)
+	a, b := newAPIAccount(t, r), newAPIAccount(t, r)
+	orig := postTx(t, r, a, b)
+
+	h1 := map[string]string{"Idempotency-Key": uniqueKey("rev1")}
+	if w := do(r, "POST", reversePath(orig), reverseBody, h1); w.Code != http.StatusCreated {
+		t.Fatalf("first reversal: got %d, want 201: %s", w.Code, w.Body)
+	}
+	h2 := map[string]string{"Idempotency-Key": uniqueKey("rev2")}
+	if w := do(r, "POST", reversePath(orig), reverseBody, h2); w.Code != http.StatusConflict {
+		t.Fatalf("second reversal: got %d, want 409: %s", w.Code, w.Body)
+	}
+}
+
+func TestReverseAPI_UnknownTransaction(t *testing.T) {
+	r := testRouter(t)
+
+	h := map[string]string{"Idempotency-Key": uniqueKey("revnone")}
+	w := do(r, "POST", reversePath(999999999), reverseBody, h)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("got %d, want 404: %s", w.Code, w.Body)
+	}
+}
+
+func TestReverseAPI_CannotReverseAReversal(t *testing.T) {
+	r := testRouter(t)
+	a, b := newAPIAccount(t, r), newAPIAccount(t, r)
+	orig := postTx(t, r, a, b)
+
+	h := map[string]string{"Idempotency-Key": uniqueKey("rev")}
+	w := do(r, "POST", reversePath(orig), reverseBody, h)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("reverse: got %d, want 201: %s", w.Code, w.Body)
+	}
+	var rev struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rev); err != nil {
+		t.Fatal(err)
+	}
+
+	h2 := map[string]string{"Idempotency-Key": uniqueKey("revrev")}
+	if w := do(r, "POST", reversePath(rev.ID), reverseBody, h2); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("reverse a reversal: got %d, want 422: %s", w.Code, w.Body)
+	}
+}
+
+func TestReverseAPI_RetryIsAReplay(t *testing.T) {
+	r := testRouter(t)
+	a, b := newAPIAccount(t, r), newAPIAccount(t, r)
+	orig := postTx(t, r, a, b)
+
+	h := map[string]string{"Idempotency-Key": uniqueKey("revretry")}
+	first := do(r, "POST", reversePath(orig), reverseBody, h)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first: got %d, want 201: %s", first.Code, first.Body)
+	}
+	second := do(r, "POST", reversePath(orig), reverseBody, h) // same key, same body: a network retry
+	if second.Code != http.StatusOK {
+		t.Fatalf("retry: got %d, want 200: %s", second.Code, second.Body)
+	}
+
+	var f, s struct {
+		ID       int64 `json:"id"`
+		Replayed bool  `json:"replayed"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &f); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Replayed || s.ID != f.ID {
+		t.Errorf("retry: id %d replayed=%v, want id %d replayed=true", s.ID, s.Replayed, f.ID)
+	}
+}
+
+func TestReverseAPI_BadRequests(t *testing.T) {
+	r := testRouter(t)
+	a, b := newAPIAccount(t, r), newAPIAccount(t, r)
+	orig := postTx(t, r, a, b)
+	key := map[string]string{"Idempotency-Key": uniqueKey("revbad")}
+
+	cases := []struct {
+		name    string
+		path    string
+		body    string
+		headers map[string]string
+	}{
+		{"missing key", reversePath(orig), reverseBody, nil},
+		{"missing date", reversePath(orig), `{}`, key},
+		{"bad date", reversePath(orig), `{"effective_date":"27/10/2026"}`, key},
+		{"bad id", "/transactions/abc/reverse", reverseBody, key},
+		{"zero id", "/transactions/0/reverse", reverseBody, key},
+	}
+	for _, c := range cases {
+		w := do(r, "POST", c.path, c.body, c.headers)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400: %s", c.name, w.Code, w.Body)
+		}
+	}
+
+	// None of those bad requests may have reversed anything.
+	if got := balanceOf(t, r, a, "2026-10-27"); got != 100 {
+		t.Errorf("balance of a = %d after bad requests, want 100", got)
+	}
+}

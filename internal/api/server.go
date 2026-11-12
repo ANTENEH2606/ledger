@@ -33,6 +33,7 @@ func (s *Server) Routes() *gin.Engine {
 
 	r.POST("/accounts", s.createAccount)
 	r.POST("/transactions", s.postTransaction)
+	r.POST("/transactions/:id/reverse", s.reverseTransaction)
 	r.GET("/accounts/:id/statement", s.getStatement)
 	r.GET("/accounts/:id/balance", s.getBalance)
 	r.GET("/trial-balance", s.getTrialBalance)
@@ -111,6 +112,22 @@ type transactionResponse struct {
 	Replayed              bool      `json:"replayed"`
 }
 
+func toResponse(res ledger.PostResult) transactionResponse {
+	resp := transactionResponse{
+		ID:             res.ID,
+		IdempotencyKey: res.IdempotencyKey,
+		EffectiveDate:  res.EffectiveDate.Format("2006-01-02"),
+		Description:    res.Description,
+		CreatedAt:      res.CreatedAt,
+		Replayed:       res.Replayed,
+	}
+	if res.ReversesTransactionID.Valid {
+		id := res.ReversesTransactionID.Int64
+		resp.ReversesTransactionID = &id
+	}
+	return resp
+}
+
 func (s *Server) postTransaction(c *gin.Context) {
 	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
 	if key == "" {
@@ -147,25 +164,59 @@ func (s *Server) postTransaction(c *gin.Context) {
 		return
 	}
 
-	resp := transactionResponse{
-		ID:             res.ID,
-		IdempotencyKey: res.IdempotencyKey,
-		EffectiveDate:  res.EffectiveDate.Format("2006-01-02"),
-		Description:    res.Description,
-		CreatedAt:      res.CreatedAt,
-		Replayed:       res.Replayed,
+	status := http.StatusCreated
+	if res.Replayed {
+		status = http.StatusOK
 	}
-	if res.ReversesTransactionID.Valid {
-		id := res.ReversesTransactionID.Int64
-		resp.ReversesTransactionID = &id
+	c.JSON(status, toResponse(res))
+}
+
+type reverseRequest struct {
+	EffectiveDate string `json:"effective_date" binding:"required"` // YYYY-MM-DD
+	Description   string `json:"description"`
+}
+
+func (s *Server) reverseTransaction(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid transaction id"})
+		return
+	}
+
+	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Idempotency-Key header is required"})
+		return
+	}
+
+	var req reverseRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	date, err := time.Parse("2006-01-02", req.EffectiveDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "effective_date must be YYYY-MM-DD"})
+		return
+	}
+
+	res, err := s.svc.ReverseTransaction(c.Request.Context(), id, ledger.ReverseInput{
+		IdempotencyKey: key,
+		EffectiveDate:  date,
+		Description:    req.Description,
+	})
+	if err != nil {
+		status, msg := mapError(err)
+		c.JSON(status, gin.H{"error": msg})
+		return
 	}
 
 	status := http.StatusCreated
 	if res.Replayed {
 		status = http.StatusOK
 	}
-
-	c.JSON(status, resp)
+	c.JSON(status, toResponse(res))
 }
 
 func mapError(err error) (int, string) {
@@ -185,6 +236,15 @@ func mapError(err error) (int, string) {
 
 	case errors.Is(err, ledger.ErrIdempotencyKeyReuse):
 		return http.StatusConflict, err.Error()
+
+	case errors.Is(err, ledger.ErrTransactionNotFound):
+		return http.StatusNotFound, err.Error()
+
+	case errors.Is(err, ledger.ErrAlreadyReversed):
+		return http.StatusConflict, err.Error()
+
+	case errors.Is(err, ledger.ErrCannotReverseReversal):
+		return http.StatusUnprocessableEntity, err.Error()
 
 	default:
 		return http.StatusInternalServerError, "internal error"
