@@ -6,6 +6,8 @@ A double-entry ledger service written in Go, backed by PostgreSQL. It is built t
 
 > **Status:** core ledger complete. Atomic posting with idempotency, concurrency-safe overdraft protection, reversals, an HTTP API, reports (paginated statement, balance as of a date, trial balance), and a transactional outbox that delivers signed webhooks. Tested on every push by CI, including concurrency tests under Go's race detector and tests that attack the database triggers with raw SQL. No authentication yet (see [Known limits](#known-limits)).
 
+New here? Start with the [one-page overview](docs/OVERVIEW.md).
+
 ## What it guarantees
 
 | Guarantee | How it is enforced |
