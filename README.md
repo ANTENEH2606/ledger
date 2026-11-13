@@ -4,18 +4,19 @@
 
 A double-entry ledger service written in Go, backed by PostgreSQL. It is built to stay correct under retries and concurrent requests: money is never lost, never double-posted, and every transaction balances. The important rules are enforced by the database itself, not only by application code.
 
-> **Status:** core ledger complete. Atomic posting with idempotency, concurrency-safe overdraft protection, an HTTP API, reports (paginated statement, balance as of a date, trial balance), and a transactional outbox that delivers signed webhooks. Tested on every push by CI, including concurrency tests under Go's race detector and tests that attack the database triggers with raw SQL. No authentication yet (see [Known limits](#known-limits)).
+> **Status:** core ledger complete. Atomic posting with idempotency, concurrency-safe overdraft protection, reversals, an HTTP API, reports (paginated statement, balance as of a date, trial balance), and a transactional outbox that delivers signed webhooks. Tested on every push by CI, including concurrency tests under Go's race detector and tests that attack the database triggers with raw SQL. No authentication yet (see [Known limits](#known-limits)).
 
 ## What it guarantees
 
 | Guarantee | How it is enforced |
 | --- | --- |
 | **Every transaction balances** | A deferred constraint trigger checks at `COMMIT` that a transaction has at least two entries, in one currency, summing to zero. An unbalanced transaction cannot be committed, even with raw SQL. |
-| **History is never rewritten** | `UPDATE`, `DELETE` and `TRUNCATE` on `entries` and `transactions` are blocked by triggers. Mistakes are corrected with reversing transactions, as in real accounting. |
+| **History is never rewritten** | `UPDATE`, `DELETE` and `TRUNCATE` on `entries` and `transactions` are blocked by triggers. Mistakes are corrected with reversing transactions (`POST /transactions/:id/reverse`), as in real accounting. |
+| **A transaction is reversed at most once** | `reverses_transaction_id` is `UNIQUE`, so the database itself refuses a second reversal, even if two requests race. |
 | **Retries never double-post** | `idempotency_key` is `UNIQUE`; the insert uses `ON CONFLICT DO NOTHING`, and a retry returns the original transaction (`200`, with `"replayed": true`). |
-| **A reused key with different content is rejected** | A SHA-256 fingerprint of the request (entries and effective date) is stored with the key. Same key and different content returns `409`. |
+| **A reused key with different content is rejected** | A SHA-256 fingerprint of the request (entries, effective date and, for reversals, the original transaction id) is stored with the key. Same key and different content returns `409`. |
 | **No lost updates under concurrency** | Posting locks every account involved with `SELECT ... FOR UPDATE`, in id order, so transfers in opposite directions cannot deadlock. Deadlocks and serialization failures are retried. |
-| **No overdraft where forbidden** | Accounts with `allow_overdraft = false` are checked against a balance read *while the account is locked*, so simultaneous withdrawals cannot all pass the check. Backdated postings on such accounts are refused, so a past date cannot go negative either. |
+| **No overdraft where forbidden** | Accounts with `allow_overdraft = false` are checked against a balance read *while the account is locked*, so simultaneous withdrawals cannot all pass the check. Backdated postings on such accounts are refused, so a past date cannot go negative either. Reversals obey the same rule. |
 | **Events are never lost or invented** | Every posting writes a `transaction.posted` event to `outbox_events` in the *same* database transaction. A rejected or rolled-back posting leaves no event; a committed one always has one. A worker delivers events at least once, with retries. |
 | **No rounding errors** | Amounts are signed `BIGINT` in minor units (positive = debit, negative = credit). No floats. Sums are overflow-checked. |
 | **Balances are derived** | A balance is the sum of entries. It is never stored and overwritten. |
@@ -68,6 +69,17 @@ curl -X POST localhost:8080/transactions \
 
 Run the same transaction command again: you get the same transaction back (status `200` and `"replayed": true`), and nothing is posted twice.
 
+Made a mistake? Reverse it (use the `id` from the response above, here `1`):
+
+```bash
+curl -X POST localhost:8080/transactions/1/reverse \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 0b8a2d34-5e1c-4f6a-9a77-3c2d1e4f5a6b" \
+  -d '{"effective_date":"2026-10-30"}'
+```
+
+Both accounts are back to zero, and the original transaction is still there, untouched.
+
 By default the API only logs the events it produces (look for `outbox event ...` in `docker compose logs api`). See [Events and webhooks](#events-and-webhooks) to deliver them to a URL.
 
 ## API
@@ -76,6 +88,7 @@ By default the API only logs the events it produces (look for `outbox event ...`
 | --- | --- |
 | `POST /accounts` | Create an account (`code`, `name`, `type`, `currency`, optional `allow_overdraft`, default `true`) |
 | `POST /transactions` | Post a transaction. Requires the `Idempotency-Key` header. |
+| `POST /transactions/:id/reverse` | Post a new transaction that exactly undoes transaction `:id`. Requires the `Idempotency-Key` header and `{"effective_date": "YYYY-MM-DD"}`; `description` is optional. See [Reversals](#reversals). |
 | `GET /accounts/:id/statement?limit=50&cursor=...` | Entries on an account with a running balance, oldest first, one page at a time |
 | `GET /accounts/:id/balance?as_of=YYYY-MM-DD` | Balance at the end of a date (default: today) |
 | `GET /trial-balance?as_of=YYYY-MM-DD` | Debits, credits and balance per account, with totals per currency |
@@ -87,17 +100,27 @@ All amounts are integers in minor units. In a transaction, positive is a debit a
 
 | Status | Meaning |
 | --- | --- |
-| `200` | The request worked. Reads (statement, balance, trial balance, health), and a replayed `POST /transactions` where nothing new was written. |
-| `201` | Something new was created (`POST /accounts`, or the first `POST /transactions` with a key). |
-| `400` | Malformed request: missing key, fewer than two entries, a zero amount, unbalanced, bad date, bad `limit` or `cursor`. |
-| `404` | Account not found. |
-| `409` | Idempotency key reused with different content, or duplicate account code. |
-| `422` | Valid request that breaks a business rule: unknown account, mixed currencies, insufficient funds, backdated posting on a no-overdraft account. |
+| `200` | The request worked. Reads (statement, balance, trial balance, health), and a replayed `POST /transactions` or reversal where nothing new was written. |
+| `201` | Something new was created (`POST /accounts`, or the first post or reversal with a given key). |
+| `400` | Malformed request: missing key, fewer than two entries, a zero amount, unbalanced, bad date, bad id, bad `limit` or `cursor`. Also a posting dated before the newest entry of a no-overdraft account. |
+| `404` | Account or transaction not found. |
+| `409` | Idempotency key reused with different content, duplicate account code, or a transaction that has already been reversed. |
+| `422` | Valid request that breaks a business rule: unknown account, mixed currencies, insufficient funds, or reversing a reversal. |
 | `500` | Server error (details are never shown). |
+
+## Reversals
+
+Posted rows never change, so mistakes are fixed by posting an opposite transaction, the way accountants do. `POST /transactions/:id/reverse` reads the original entries, flips every amount, links the new transaction to the original (`reverses_transaction_id`), and posts it through the same path as any other transaction.
+
+- **Once only.** A unique constraint on `reverses_transaction_id` means the database itself refuses a second reversal (`409`), even if two requests race.
+- **No reversing a reversal** (`422`). To undo a reversal, post a new transaction.
+- **Same rules as any posting.** A reversal is refused with `422` if it would overdraw a no-overdraft account (for example, undoing a deposit whose money has already been withdrawn), and with `400` if it is dated before the newest entry of such an account.
+- **Idempotent.** Retrying with the same `Idempotency-Key` returns the original reversal with `200` and `"replayed": true`. The request fingerprint includes the original transaction id, so reusing a key for a different transaction is a `409`.
+- **Events.** A reversal writes its own `transaction.posted` event, with `reverses_transaction_id` set so receivers can tell it apart from a normal posting.
 
 ## Events and webhooks
 
-Every successful posting also writes a `transaction.posted` event into the `outbox_events` table, **inside the same database transaction** as the entries. This is the transactional outbox pattern: saving and then sending as two separate steps can lose an event (a crash in between) or announce money that never moved (the save fails after the send). With the outbox, the event and the posting commit together or not at all.
+Every successful posting (including reversals) also writes a `transaction.posted` event into the `outbox_events` table, **inside the same database transaction** as the entries. This is the transactional outbox pattern: saving and then sending as two separate steps can lose an event (a crash in between) or announce money that never moved (the save fails after the send). With the outbox, the event and the posting commit together or not at all.
 
 A background worker inside the API process then delivers the events:
 
@@ -115,6 +138,8 @@ A background worker inside the API process then delivers the events:
 {"transaction_id": 3847, "effective_date": "2026-11-07", "description": "outbox demo",
  "entries": [{"account_id": 220, "amount": 5000}, {"account_id": 221, "amount": -5000}]}
 ```
+
+For a reversal, the payload also has `"reverses_transaction_id"` with the id of the original. The field is left out for normal postings.
 
 **Headers:**
 
@@ -155,8 +180,8 @@ For example: `WEBHOOK_URL=https://example.com/hooks WEBHOOK_SECRET=<long random 
 - **Signed amounts.** One column instead of separate debit and credit columns. "Debits equal credits" becomes `SUM(amount) = 0`, which the database can check directly.
 - **Rules in the database.** Application code can have bugs and other writers can exist. Triggers and constraints make the invariants hold for every client, and tests attack them with raw SQL to prove it.
 - **Locks only where a rule reads a balance.** Because balances are derived from append-only entries, plain concurrent inserts are safe. Account locks are needed for rules such as "no overdraft", where a check-then-act race would otherwise be possible. Accounts are always locked in id order to rule out deadlocks.
-- **A versioned request fingerprint.** The hash covers only what the client sent (sorted entries and the effective date) with a `ledger/request/v1` prefix. It leaves out the description and anything server-generated, so a retry always produces the same hash. It is never returned by the API.
-- **Corrections by reversal.** The schema supports a `reverses_transaction_id` link (unique). There is no reversal endpoint yet.
+- **A versioned request fingerprint.** The hash covers only what the client sent (sorted entries and the effective date) with a `ledger/request/v1` prefix. It leaves out the description and anything server-generated, so a retry always produces the same hash. For reversals it also covers the original transaction id, and the text of normal postings is unchanged, so stored hashes stay valid. It is never returned by the API.
+- **Corrections by reversal.** A reversal is a normal posting with flipped amounts and a link to the original, so it goes through every existing rule (balance, overdraft, idempotency, outbox) with no special case. The database guarantees "at most once" with a unique constraint; the code only turns that failure into a clean `409`.
 - **Cursor pagination.** The cursor is the date and id of the last entry returned, so pages do not shift when new entries arrive.
 - **Events in the same transaction.** The outbox row is written with the entries, so an event can never exist without its posting, or the other way round. Delivery is a separate, retried step.
 - **Signed webhooks.** The signature covers the timestamp and the body, so a request cannot be altered or replayed later. The secret never appears in logs or in stored error messages.
@@ -201,7 +226,7 @@ After changing a migration or `db/queries/ledger.sql`, run `sqlc generate`. Appl
 
 - **No authentication or authorization.** The API listens on `127.0.0.1` only. Idempotency keys are global; a real deployment should scope them per authenticated client.
 - **Hot accounts serialize.** Postings that touch the same account queue on its lock.
-- **No reversal endpoint yet** (the schema supports it), and no pagination on the trial balance. Statements are paginated with a cursor.
+- **A reversal cannot be reversed**, and a reversal uses the date the caller sends, not the original's date. On a no-overdraft account it can be refused if the money has since left, or if it is dated before a newer entry. There is no pagination on the trial balance.
 - **The statement's running balance is recomputed over the account's whole history on every page.** It is correct, but slow for very large accounts; a stored checkpoint balance would fix that.
 - **One currency per transaction.** There is no foreign-exchange support.
 - **The backdating rule is deliberately conservative.** An account with `allow_overdraft = false` refuses any posting dated before its newest entry, including backdated deposits. Accounts that allow overdraft can be backdated freely.
@@ -228,7 +253,7 @@ ledger/
   internal/
     api/                   Gin handlers and error mapping
     db/                    generated by sqlc (do not edit)
-    ledger/                posting logic, validation, request hash, tests
+    ledger/                posting logic, reversals, validation, request hash, tests
     outbox/                outbox worker, retry logic, signed webhook publisher
   .github/workflows/ci.yml tests on every push
 ```
